@@ -19,9 +19,8 @@ let controls, group;
 let world; // Physics world
 const objectMap = new Map();
 
-// --- Rapier Initialization (Modified) ---
+// --- Rapier Initialization  ---
 let RAPIER = null; // Global variable to hold the Rapier module
-
 async function initRapier() {
   // Use jsDelivr to load the pre-built WASM and JS files *directly*.
   // https://cdn.jsdelivr.net/npm/@dimforge/rapier3d-compat@0.14.0/rapier.es.min.js
@@ -32,6 +31,7 @@ async function initRapier() {
   init();  // Call the rest of your initialization *after* Rapier is ready
   animate();
 }
+
 async function init() {
     container = document.createElement('div');
     document.body.appendChild(container);
@@ -84,7 +84,7 @@ async function init() {
     ];
 
     for (let i = 0; i < 50; i++) {
-        const geometry = geometries[Math.floor(Math.random() * geometries.length)];
+        const geometry = geometries[Math.floor(Math.random() /* geometries.length*/)];
         const material = new THREE.MeshStandardMaterial({
             color: Math.random() * 0xffffff,
             roughness: 0.7,

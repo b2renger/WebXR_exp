@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 // NO Skypack for Rapier!  Load the pre-built files directly.
-// import * as RAPIER from 'https://cdn.skypack.dev/@dimforge/rapier3d';  // <-- REMOVE THIS
+// import * as RAPIER from 'https://cdn.skypack.dev/@dimforge/rapier3d'; 
 
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { XRButton } from 'three/addons/webxr/XRButton.js';
@@ -23,15 +23,15 @@ const objectMap = new Map();
 let RAPIER = null; // Global variable to hold the Rapier module
 
 async function initRapier() {
-    // Use jsDelivr to load the pre-built WASM and JS files *directly*.
-    const rapierModule = await import("https://cdn.jsdelivr.net/npm/@dimforge/rapier3d@0.14.0/rapier.es.js");
-    await rapierModule.init();
-    RAPIER = rapierModule; // Assign to the global variable
-    console.log("Rapier initialized");
-    init();  // Call the rest of your initialization *after* Rapier is ready
-    animate();
+  // Use jsDelivr to load the pre-built WASM and JS files *directly*.
+  // https://cdn.jsdelivr.net/npm/@dimforge/rapier3d-compat@0.14.0/rapier.es.min.js
+  const rapierModule = await import("https://cdn.jsdelivr.net/npm/@dimforge/rapier3d-compat@0.14.0/rapier.es.min.js"); //Updated Path
+  await rapierModule.default.init(); // Updated init
+  RAPIER = rapierModule; // Assign to the global variable
+  console.log("Rapier initialized");
+  init();  // Call the rest of your initialization *after* Rapier is ready
+  animate();
 }
-
 async function init() {
     container = document.createElement('div');
     document.body.appendChild(container);

@@ -119,6 +119,7 @@ async function init() {
         objectMap.set(object, rigidBody);
         group.add(object);
     }
+    
 
     renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setPixelRatio(window.devicePixelRatio);
@@ -143,7 +144,7 @@ async function init() {
         }
 
 
-        session.requestReferenceSpace('local').then((referenceSpace) => {
+        session.requestReferenceSpace('unbounded').then((referenceSpace) => {
             session.requestAnimationFrame(function onXRFrame(t, frame) {
                 if (!renderer.xr.isPresenting) return;
                 processXRFrame(t, frame, referenceSpace);

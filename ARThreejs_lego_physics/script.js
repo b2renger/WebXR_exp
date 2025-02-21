@@ -219,10 +219,14 @@ function onSelectEnd(event) {
 
             // Apply impulse based on controller velocity
             const impulseVector = controller.userData.velocity; // Use controller velocity directly
+            console.log("Controller Velocity on release:", impulseVector); // *** ADD THIS LINE ***
+
             if (impulseVector) {
-                impulseVector.multiplyScalar(3);  // Adjust this multiplier to control throw strength - reduced to 3
+                impulseVector.multiplyScalar(30);  // *** INCREASE MULTIPLIER TO 30 FOR TESTING ***
 
                 rigidBody.applyImpulse(new RAPIER.default.Vector3(impulseVector.x, impulseVector.y, impulseVector.z), true); // Apply impulse
+            } else {
+                console.log("No controller velocity data available on release."); // Add this line to check if impulseVector is null
             }
         }
         controller.userData.selected = undefined;

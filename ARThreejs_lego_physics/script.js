@@ -90,7 +90,7 @@ async function init() {
         const geometry = geometries[Math.floor(Math.random() * geometries.length)];
         const material = new THREE.MeshStandardMaterial({
             color: Math.random() * 0xffffff,
-            roughness: 0.7,
+            roughness: 0.5, // Reduced roughness for a bit more bounciness/sliding
             metalness: 0.1
         });
 
@@ -111,25 +111,26 @@ async function init() {
 
         if (geometry instanceof THREE.BoxGeometry) {
             rigidBodyDesc = RAPIER.default.RigidBodyDesc.dynamic().setTranslation(object.position.x, object.position.y, object.position.z);
-            colliderDesc = RAPIER.default.ColliderDesc.cuboid(object.scale.x * 0.1, object.scale.y * 0.1, object.scale.z * 0.1);
+            colliderDesc = RAPIER.default.ColliderDesc.cuboid(object.scale.x * 0.1, object.scale.y * 0.1, object.scale.z * 0.1).setRestitution(0.7); // Add restitution for bounciness
         } else if (geometry instanceof THREE.ConeGeometry) {
             rigidBodyDesc = RAPIER.default.RigidBodyDesc.dynamic().setTranslation(object.position.x, object.position.y, object.position.z);
-            colliderDesc = RAPIER.default.ColliderDesc.cone(object.scale.y * 0.1, object.scale.x * 0.1);
+            colliderDesc = RAPIER.default.ColliderDesc.cone(object.scale.y * 0.1, object.scale.x * 0.1).setRestitution(0.7); // Add restitution for bounciness
         } else if (geometry instanceof THREE.CylinderGeometry) {
             rigidBodyDesc = RAPIER.default.RigidBodyDesc.dynamic().setTranslation(object.position.x, object.position.y, object.position.z);
-            colliderDesc = RAPIER.default.ColliderDesc.cylinder(object.scale.y * 0.1, object.scale.x * 0.1);
+            colliderDesc = RAPIER.default.ColliderDesc.cylinder(object.scale.y * 0.1, object.scale.x * 0.1).setRestitution(0.7); // Add restitution for bounciness
         } else if (geometry instanceof THREE.IcosahedronGeometry) {
             rigidBodyDesc = RAPIER.default.RigidBodyDesc.dynamic().setTranslation(object.position.x, object.position.y, object.position.z);
-            colliderDesc = RAPIER.default.ColliderDesc.ball(object.scale.x * 0.2);
+            colliderDesc = RAPIER.default.ColliderDesc.ball(object.scale.x * 0.2).setRestitution(0.7); // Add restitution for bounciness
         } else if (geometry instanceof THREE.TorusGeometry) {
             rigidBodyDesc = RAPIER.default.RigidBodyDesc.dynamic().setTranslation(object.position.x, object.position.y, object.position.z);
-            colliderDesc = RAPIER.default.ColliderDesc.cuboid(object.scale.x * 0.2, object.scale.y * 0.04, object.scale.x * 0.2);
+            colliderDesc = RAPIER.default.ColliderDesc.cuboid(object.scale.x * 0.2, object.scale.y * 0.04, object.scale.x * 0.2).setRestitution(0.7); // Add restitution for bounciness
         } else {
             rigidBodyDesc = RAPIER.default.RigidBodyDesc.dynamic().setTranslation(object.position.x, object.position.y, object.position.z);
-            colliderDesc = RAPIER.default.ColliderDesc.cuboid(object.scale.x * 0.1, object.scale.y * 0.1, object.scale.z * 0.1);
+            colliderDesc = RAPIER.default.ColliderDesc.cuboid(object.scale.x * 0.1, object.scale.y * 0.1, object.scale.z * 0.1).setRestitution(0.7); // Add restitution for bounciness
         }
 
         let rigidBody = world.createRigidBody(rigidBodyDesc);
+        // Set friction here if needed, e.g., .setFriction(0.3) after .setRestitution() in colliderDesc if you want to experiment with friction too.
         let collider = world.createCollider(colliderDesc, rigidBody);
         objectMap.set(object, rigidBody);
         group.add(object);
@@ -199,10 +200,6 @@ function onSelectStart(event) {
             rigidBody.setLinvel(new RAPIER.default.Vector3(0, 0, 0));
             rigidBody.setAngvel(new RAPIER.default.Vector3(0, 0, 0));
             rigidBody.setGravityScale(0, false);
-
-            // Store the initial grab position *in world coordinates*.
-            controller.userData.grabStartPosition = new THREE.Vector3();
-            controller.getWorldPosition(controller.userData.grabStartPosition); // Use getWorldPosition
         }
     }
     controller.userData.targetRayMode = event.data.targetRayMode;
@@ -220,16 +217,13 @@ function onSelectEnd(event) {
         if (rigidBody) {
             rigidBody.setGravityScale(1, false);
 
-             // Calculate impulse vector *in world coordinates*.
-            const grabEndPosition = new THREE.Vector3();
-            controller.getWorldPosition(grabEndPosition); // Use getWorldPosition
-            const impulseVector = new THREE.Vector3();
+            // Apply impulse based on controller velocity
+            const impulseVector = controller.userData.velocity; // Use controller velocity directly
+            if (impulseVector) {
+                impulseVector.multiplyScalar(3);  // Adjust this multiplier to control throw strength - reduced to 3
 
-            impulseVector.subVectors(grabEndPosition, controller.userData.grabStartPosition).multiplyScalar(5); // Adjust multiplier as needed
-            // Apply impulse
-            rigidBody.applyImpulse(impulseVector, true); // Use applyImpulse
-            controller.userData.grabStartPosition = null; // Clear start position
-
+                rigidBody.applyImpulse(new RAPIER.default.Vector3(impulseVector.x, impulseVector.y, impulseVector.z), true); // Apply impulse
+            }
         }
         controller.userData.selected = undefined;
     }

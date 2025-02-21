@@ -222,7 +222,7 @@ function onSelectEnd(event) {
            // console.log("Controller Velocity on release:", impulseVector); // *** ADD THIS LINE ***
 
             if (impulseVector) {
-                impulseVector.multiplyScalar(100);  // *** INCREASE MULTIPLIER TO 30 FOR TESTING ***
+                impulseVector.multiplyScalar(500);  
 
                 rigidBody.applyImpulse(new RAPIER.default.Vector3(impulseVector.x, impulseVector.y, impulseVector.z), true); // Apply impulse
             } else {

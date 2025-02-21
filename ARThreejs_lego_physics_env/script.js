@@ -127,11 +127,22 @@ async function init() {
     renderer.xr.enabled = true;
     container.appendChild(renderer.domElement);
 
-    document.body.appendChild(XRButton.createButton(renderer));
+    document.body.appendChild(XRButton.createButton(renderer, {
+        requiredFeatures: ['plane-detection'] // Explicitly request plane detection
+    }));
 
     // --- WebXR Plane Detection ---
     renderer.xr.addEventListener('sessionstart', async () => {
         const session = renderer.xr.getSession();
+
+        // Check if plane detection was successfully enabled
+        if (session.enabledFeatures.has('plane-detection')) {
+            console.log("Plane detection is enabled and supported.");
+        } else {
+            console.warn("Plane detection was requested but might not be enabled or supported by the browser/device.");
+        }
+
+
         session.requestReferenceSpace('local').then((referenceSpace) => {
             session.requestAnimationFrame(function onXRFrame(t, frame) {
                 if (!renderer.xr.isPresenting) return;

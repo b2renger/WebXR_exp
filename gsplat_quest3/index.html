@@ -69,7 +69,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 // Config. Override the splat with ?src=my_scene.sog (also .spz/.ply/.splat/.ksplat)
 // ---------------------------------------------------------------------------
 const params     = new URLSearchParams(location.search);
-const SPLAT_URL  = params.get('src') || './splatcaptspirulae.sog';
+const SPLAT_URL  = params.get('src') || './splat.sog';
 const TARGET_H   = parseFloat(params.get('height') || '1.0'); // default on-surface height, metres
 const MOVE_SPEED = 0.6;   // m/s   thumbstick translation
 const ROT_SPEED  = 1.4;   // rad/s thumbstick rotation

@@ -1,0 +1,572 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Quest 3 — Gaussian Splat anchored on a surface (Spark.js)</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; overflow:hidden; background:#0b0d10; color:#e7ecf2;
+               font:13px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  canvas { display:block; }
+
+  /* DOM overlay: a desktop panel, and an in-headset HUD while in AR */
+  #ui { position:fixed; inset:auto auto 12px 12px; max-width:340px; z-index:10;
+        background:rgba(12,15,20,.78); border:1px solid rgba(255,255,255,.14);
+        border-radius:12px; padding:12px 14px; backdrop-filter:blur(8px); }
+  #ui h1 { margin:0 0 6px; font-size:14px; font-weight:600; letter-spacing:.2px; }
+  #status { margin:0 0 8px; font-size:12px; color:#9fb0c4; min-height:1.4em; }
+  #status.err { color:#ff8b8b; }
+  kbd { background:rgba(255,255,255,.1); border:1px solid rgba(255,255,255,.18);
+        border-radius:4px; padding:0 4px; font:inherit; font-size:11px; }
+  #help { margin:0; padding:0; list-style:none; font-size:12px; color:#c3cfdd; }
+  #help li { margin:2px 0; }
+  #btns { display:flex; flex-wrap:wrap; gap:6px; margin-top:10px; }
+  #btns button { flex:1 1 auto; min-width:76px; min-height:34px; cursor:pointer;
+        background:rgba(255,255,255,.08); color:#e7ecf2; border:1px solid rgba(255,255,255,.2);
+        border-radius:8px; padding:6px 10px; font:inherit; }
+  #btns button:hover { background:rgba(255,255,255,.16); }
+</style>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/",
+    "@sparkjsdev/spark": "https://sparkjs.dev/releases/spark/2.1.0/spark.module.js"
+  }
+}
+</script>
+</head>
+<body>
+
+<div id="ui">
+  <h1>Gaussian splat &mdash; surface anchored</h1>
+  <p id="status">Loading splat&hellip;</p>
+  <ul id="help">
+    <li><b>In AR:</b> aim at a flat surface, <b>trigger</b> to place.</li>
+    <li>Left stick: move &middot; Right stick: X rotate / Y scale</li>
+    <li>Grip: grab &amp; move &middot; Both grips: pinch to scale + rotate</li>
+    <li>A/X: re-place &middot; B/Y: reset</li>
+    <li><b>Desktop:</b> drag to orbit &middot; shift-click ground to move &middot;
+        <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> move &middot;
+        <kbd>Q</kbd><kbd>E</kbd> rotate &middot; <kbd>+</kbd><kbd>-</kbd> scale</li>
+  </ul>
+  <div id="btns">
+    <button id="b-replace" type="button">Re-place</button>
+    <button id="b-reset"   type="button">Reset</button>
+    <button id="b-flip"    type="button">Flip up-axis</button>
+    <button id="b-onetoone" type="button">Scale 1:1</button>
+  </div>
+  <div id="ar-btn-slot"></div>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { SparkRenderer, SplatMesh } from '@sparkjsdev/spark';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// ---------------------------------------------------------------------------
+// Config. Override the splat with ?src=my_scene.sog (also .spz/.ply/.splat/.ksplat)
+// ---------------------------------------------------------------------------
+const params     = new URLSearchParams(location.search);
+const SPLAT_URL  = params.get('src') || './splatcaptspirulae.sog';
+const TARGET_H   = parseFloat(params.get('height') || '1.0'); // default on-surface height, metres
+const MOVE_SPEED = 0.6;   // m/s   thumbstick translation
+const ROT_SPEED  = 1.4;   // rad/s thumbstick rotation
+const SCALE_RATE = 1.2;   // ln(scale)/s thumbstick scaling
+const DEADZONE   = 0.15;
+
+const statusEl = document.getElementById('status');
+const say = (msg, isErr) => { statusEl.textContent = msg; statusEl.classList.toggle('err', !!isErr); };
+
+// ---------------------------------------------------------------------------
+// Renderer / scene
+// ---------------------------------------------------------------------------
+const renderer = new THREE.WebGLRenderer({ antialias: false, alpha: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setClearAlpha(0);                 // transparent, so passthrough shows through
+renderer.xr.enabled = true;
+renderer.xr.setReferenceSpaceType('local-floor');
+document.body.appendChild(renderer.domElement);
+
+const scene  = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.01, 200);
+camera.position.set(0, 1.6, 2.2);
+
+// Spark needs the WebGL renderer so it can sort/accumulate outside the render loop.
+const spark = new SparkRenderer({ renderer });
+scene.add(spark);
+
+// Desktop-only helpers, hidden while in AR
+const grid = new THREE.GridHelper(8, 16, 0x3b4a5e, 0x212a35);
+grid.material.transparent = true; grid.material.opacity = 0.55;
+scene.add(grid);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 0.5, 0);
+controls.enableDamping = true;
+controls.update();
+
+// ---------------------------------------------------------------------------
+// Scene graph
+//   anchorNode : world pose of the anchor point on the surface (position + yaw)
+//     rig      : user transform relative to the anchor (offset, yaw, uniform scale)
+//       content: re-centring offset so the splat base sits at the rig origin
+//         splat: the SplatMesh, carrying only the file's up-axis correction
+// ---------------------------------------------------------------------------
+const anchorNode = new THREE.Group();
+const rig        = new THREE.Group();
+const content    = new THREE.Group();
+anchorNode.add(rig); rig.add(content); scene.add(anchorNode);
+
+let anchorYaw = 0;      // yaw baked into anchorNode, kept aside for world<->local maths
+let baseScale = 1;      // scale that makes the splat TARGET_H metres tall
+let flipped   = true;   // most .sog / .ply captures are Y-down => 180 deg about X
+
+const splat = new SplatMesh({
+  url: SPLAT_URL,
+  onProgress: (e) => {
+    if (e && e.lengthComputable) say('Loading splat... ' + Math.round(100 * e.loaded / e.total) + '%');
+  },
+});
+content.add(splat);
+
+// --- fit / re-centre -------------------------------------------------------
+const _box = new THREE.Box3(), _size = new THREE.Vector3(), _ctr = new THREE.Vector3();
+
+function applyOrientation() {
+  // 180 deg about X converts the usual splat convention (Y-down) to three.js (Y-up)
+  splat.quaternion.set(flipped ? 1 : 0, 0, 0, flipped ? 0 : 1);
+}
+
+// Local-space bounds (rig space, before rig scale) used for grab hit-testing:
+// cheap, and avoids needing a per-splat raycast.
+const localBounds = new THREE.Box3();
+const worldBounds = new THREE.Box3();
+function updateWorldBounds() {
+  anchorNode.updateMatrixWorld(true);
+  worldBounds.copy(localBounds).applyMatrix4(rig.matrixWorld);
+}
+
+function refit() {
+  applyOrientation();
+  _box.copy(splat.getBoundingBox(true));
+  _box.applyMatrix4(new THREE.Matrix4().makeRotationFromQuaternion(splat.quaternion));
+  _box.getSize(_size); _box.getCenter(_ctr);
+  // centre horizontally, drop the base onto the surface plane
+  splat.position.set(-_ctr.x, -_box.min.y, -_ctr.z);
+  baseScale = _size.y > 1e-4 ? TARGET_H / _size.y : 1;
+  rig.scale.setScalar(baseScale);
+  localBounds.setFromCenterAndSize(
+    new THREE.Vector3(0, _size.y / 2, 0),
+    new THREE.Vector3(Math.max(_size.x, 0.05), Math.max(_size.y, 0.05), Math.max(_size.z, 0.05)));
+}
+
+splat.initialized.then(() => {
+  refit();
+  say('Loaded. Enter AR, aim at a surface and pull the trigger.');
+}).catch((err) => {
+  console.error(err);
+  say('Could not load ' + SPLAT_URL + ' - ' + (err && err.message ? err.message : err), true);
+});
+
+// ---------------------------------------------------------------------------
+// AR session: hit-test reticle + XRAnchor
+// ---------------------------------------------------------------------------
+const reticle = new THREE.Mesh(
+  new THREE.RingGeometry(0.055, 0.075, 48).rotateX(-Math.PI / 2),
+  new THREE.MeshBasicMaterial({ color: 0x66e0ff, transparent: true, opacity: 0.9, depthTest: false }));
+reticle.matrixAutoUpdate = false;
+reticle.visible = false;
+reticle.renderOrder = 999;
+scene.add(reticle);
+
+let hitTestSource = null, viewerSpace = null;
+let placing   = true;    // reticle live, trigger places the splat
+let hasPlaced = false;
+let xrAnchor  = null;    // XRAnchor when the runtime supports 'anchors'
+
+// Own AR button rather than three's ARButton: that helper forces the 'local'
+// reference space, absolutely-positions itself, and hides the dom-overlay root
+// (our whole panel) when the session ends.
+const arBtn = document.createElement('button');
+arBtn.type = 'button';
+arBtn.style.cssText = 'width:100%;margin-top:8px;min-height:38px;cursor:pointer;' +
+  'background:#1d6fe0;color:#fff;border:0;border-radius:8px;padding:8px 12px;font:inherit;font-weight:600;';
+arBtn.textContent = 'Checking AR support…';
+arBtn.disabled = true;
+document.getElementById('ar-btn-slot').appendChild(arBtn);
+
+let arSession = null;
+
+const AR_OPTIONAL = ['anchors', 'plane-detection', 'hand-tracking', 'dom-overlay', 'unbounded'];
+const arInit = (withFloor) => ({
+  requiredFeatures: withFloor ? ['hit-test', 'local-floor'] : ['hit-test'],
+  optionalFeatures: AR_OPTIONAL,
+  domOverlay: { root: document.getElementById('ui') },
+});
+
+if (navigator.xr) {
+  navigator.xr.isSessionSupported('immersive-ar').then((ok) => {
+    arBtn.disabled = !ok;
+    arBtn.textContent = ok ? 'Enter AR' : 'AR not supported on this device';
+    if (!ok) arBtn.style.background = '#3a4250';
+  }).catch(() => { arBtn.textContent = 'AR unavailable'; });
+} else {
+  arBtn.textContent = 'WebXR unavailable (needs HTTPS)';
+  arBtn.style.background = '#3a4250';
+}
+
+arBtn.onclick = async () => {
+  if (arSession) { arSession.end(); return; }
+  let session;
+  try {
+    session = await navigator.xr.requestSession('immersive-ar', arInit(true));
+    renderer.xr.setReferenceSpaceType('local-floor');
+  } catch (e) {
+    try {
+      session = await navigator.xr.requestSession('immersive-ar', arInit(false));
+      renderer.xr.setReferenceSpaceType('local');
+    } catch (e2) {
+      say('Could not start AR: ' + (e2.message || e2), true);
+      return;
+    }
+  }
+  arSession = session;
+  session.addEventListener('end', () => { arSession = null; arBtn.textContent = 'Enter AR'; });
+  await renderer.xr.setSession(session);
+  arBtn.textContent = 'Exit AR';
+};
+
+renderer.xr.addEventListener('sessionstart', async () => {
+  const session = renderer.xr.getSession();
+  grid.visible = false;
+  controls.enabled = false;
+  renderer.xr.setFoveation(0.3);           // splats are fill-rate bound; keep the centre sharp
+  placing = true; hasPlaced = false;
+  anchorNode.visible = false;
+  say('Aim at a flat surface, then pull the trigger to place.');
+  try {
+    viewerSpace   = await session.requestReferenceSpace('viewer');
+    hitTestSource = await session.requestHitTestSource({ space: viewerSpace });
+  } catch (err) {
+    console.warn('hit-test unavailable', err);
+    say('Hit-test unavailable - placing 1.5 m in front of you.', true);
+    placeAt(new THREE.Vector3(0, 0, -1.5), 0, null);
+  }
+});
+
+renderer.xr.addEventListener('sessionend', () => {
+  hitTestSource = null; viewerSpace = null;
+  if (xrAnchor) { try { xrAnchor.delete(); } catch (e) {} xrAnchor = null; }
+  grid.visible = true;
+  controls.enabled = true;
+  anchorNode.visible = true;
+  anchorNode.position.set(0, 0, 0);
+  anchorNode.quaternion.identity();
+  anchorYaw = 0;
+  reticle.visible = false;
+  say('Left AR.');
+});
+
+// Place at a world position + yaw and, where supported, create an XRAnchor so the
+// runtime keeps the splat pinned to the real surface as tracking is refined.
+function placeAt(position, yaw, frame) {
+  if (xrAnchor) { try { xrAnchor.delete(); } catch (e) {} xrAnchor = null; }
+  anchorNode.position.copy(position);
+  anchorNode.quaternion.setFromAxisAngle(new THREE.Vector3(0, 1, 0), yaw);
+  anchorYaw = yaw;
+  anchorNode.visible = true;
+  hasPlaced = true;
+  placing = false;
+  reticle.visible = false;
+
+  const refSpace = renderer.xr.getReferenceSpace();
+  if (frame && refSpace && typeof frame.createAnchor === 'function') {
+    const q = anchorNode.quaternion;
+    const t = new XRRigidTransform(
+      { x: position.x, y: position.y, z: position.z, w: 1 },
+      { x: q.x, y: q.y, z: q.z, w: q.w });
+    frame.createAnchor(t, refSpace)
+      .then((a) => { xrAnchor = a; say('Anchored. Stick/grip to adjust, A/X to re-place.'); })
+      .catch(() => say('Placed (no anchor support). Stick/grip to adjust, A/X to re-place.'));
+  } else {
+    say('Placed. Stick/grip to adjust, A/X to re-place.');
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Controllers
+// ---------------------------------------------------------------------------
+const controllers = [0, 1].map((i) => {
+  const c = renderer.xr.getController(i);
+  const ray = new THREE.Line(
+    new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, -1)]),
+    new THREE.LineBasicMaterial({ transparent: true, opacity: 0.5 }));
+  ray.scale.z = 3;
+  c.add(ray);
+  c.userData.grabbing = false;
+  c.addEventListener('select', onSelect);
+  c.addEventListener('squeezestart', () => onSqueeze(c, true));
+  c.addEventListener('squeezeend',   () => onSqueeze(c, false));
+  scene.add(c);
+  return c;
+});
+
+let lastHitPose = null;   // {position, yaw} from the most recent reticle hit
+
+function onSelect() {
+  if (!placing || !lastHitPose) return;
+  placeAt(lastHitPose.position, lastHitPose.yaw, currentFrame);
+}
+
+// --- grab / pinch state ----------------------------------------------------
+const grab  = { active: false, ctrl: null, offset: new THREE.Vector3(), yaw0: 0, ctrlYaw0: 0 };
+const pinch = { active: false, dist0: 1, scale0: 1, angle0: 0, yaw0: 0 };
+const _wp = new THREE.Vector3(), _wq = new THREE.Quaternion(), _v = new THREE.Vector3();
+const _rayO = new THREE.Vector3(), _rayD = new THREE.Vector3();
+const _ray = new THREE.Ray();
+const UP = new THREE.Vector3(0, 1, 0);
+
+function controllerYaw(c) {
+  _v.set(0, 0, -1).applyQuaternion(c.getWorldQuaternion(_wq));
+  return Math.atan2(-_v.x, -_v.z);
+}
+
+function pointsAtSplat(c) {
+  if (!hasPlaced) return false;
+  updateWorldBounds();
+  c.getWorldPosition(_rayO);
+  if (worldBounds.containsPoint(_rayO)) return true;
+  _rayD.set(0, 0, -1).applyQuaternion(c.getWorldQuaternion(_wq)).normalize();
+  _ray.set(_rayO, _rayD);
+  return _ray.intersectsBox(worldBounds);
+}
+
+function onSqueeze(c, down) {
+  c.userData.grabbing = down;
+  const held = controllers.filter((x) => x.userData.grabbing);
+
+  if (held.length === 2) {                       // two-handed pinch: scale + rotate
+    grab.active = false; grab.ctrl = null;
+    const a = held[0], b = held[1];
+    a.getWorldPosition(_rayO); b.getWorldPosition(_v);
+    pinch.active = true;
+    pinch.dist0  = Math.max(_rayO.distanceTo(_v), 1e-3);
+    pinch.scale0 = rig.scale.x;
+    pinch.angle0 = Math.atan2(_v.x - _rayO.x, _v.z - _rayO.z);
+    pinch.yaw0   = rig.rotation.y;
+    return;
+  }
+
+  pinch.active = false;
+
+  if (down && held.length === 1 && pointsAtSplat(c)) {   // one-handed grab
+    grab.active = true;
+    grab.ctrl   = c;
+    c.getWorldPosition(_rayO);
+    rig.getWorldPosition(_wp);
+    grab.offset.copy(_wp).sub(_rayO);                    // world-space controller -> object
+    grab.yaw0     = anchorYaw + rig.rotation.y;
+    grab.ctrlYaw0 = controllerYaw(c);
+  } else if (!down && grab.ctrl === c) {
+    grab.active = false; grab.ctrl = null;
+  }
+}
+
+// Write a world position + world yaw into the rig, expressed relative to anchorNode.
+function setRigWorld(worldPos, worldYaw) {
+  anchorNode.updateMatrixWorld(true);
+  rig.position.copy(anchorNode.worldToLocal(worldPos));
+  rig.rotation.y = worldYaw - anchorYaw;
+}
+
+// ---------------------------------------------------------------------------
+// Gamepad (thumbstick) input
+// ---------------------------------------------------------------------------
+const dz = (v) => (Math.abs(v) < DEADZONE ? 0 : (v - Math.sign(v) * DEADZONE) / (1 - DEADZONE));
+const prevButtons = new WeakMap();
+const clampScale = (s) => THREE.MathUtils.clamp(s, baseScale * 0.02, baseScale * 50);
+
+function handleGamepads(dt) {
+  const session = renderer.xr.getSession();
+  if (!session) return;
+
+  let move = null, rotate = 0, scale = 0;
+
+  for (const src of session.inputSources) {
+    const gp = src.gamepad;
+    if (!gp) continue;
+    const ax = gp.axes;
+    const sx = dz(ax.length > 2 ? ax[2] : (ax[0] || 0));
+    const sy = dz(ax.length > 3 ? ax[3] : (ax[1] || 0));
+
+    if (src.handedness === 'left') {
+      if (sx || sy) move = { x: sx, y: sy };
+    } else if (src.handedness === 'right') {
+      rotate = -sx;
+      scale  = -sy;   // stick forward => bigger
+    }
+
+    // edge-triggered buttons: 4 = A/X, 5 = B/Y
+    const prev = prevButtons.get(src) || [];
+    const pressed = gp.buttons.map((b) => b.pressed);
+    if (pressed[4] && !prev[4]) { placing = true; say('Aim at a surface and pull the trigger.'); }
+    if (pressed[5] && !prev[5]) { resetTransform(); }
+    prevButtons.set(src, pressed);
+  }
+
+  if (!hasPlaced) return;
+
+  if (move) {
+    // translate on the horizontal plane, relative to where the user is looking
+    const q = camera.quaternion;
+    const headYaw = Math.atan2(2 * (q.w * q.y + q.x * q.z), 1 - 2 * (q.y * q.y + q.x * q.x));
+    const hs = Math.sin(headYaw), hc = Math.cos(headYaw);
+    const dxWorld = ( move.x * hc - move.y * hs) * MOVE_SPEED * dt;
+    const dzWorld = (-move.x * hs - move.y * hc) * MOVE_SPEED * dt;
+    // world delta -> anchor-local (anchorNode carries yaw only, no scale)
+    const as = Math.sin(-anchorYaw), ac = Math.cos(-anchorYaw);
+    rig.position.x += dxWorld * ac - dzWorld * as;
+    rig.position.z += dxWorld * as + dzWorld * ac;
+  }
+  if (rotate) rig.rotation.y += rotate * ROT_SPEED * dt;
+  if (scale)  rig.scale.setScalar(clampScale(rig.scale.x * Math.exp(scale * SCALE_RATE * dt)));
+}
+
+// ---------------------------------------------------------------------------
+// Desktop input
+// ---------------------------------------------------------------------------
+const keys = new Set();
+addEventListener('keydown', (e) => keys.add(e.key.toLowerCase()));
+addEventListener('keyup',   (e) => keys.delete(e.key.toLowerCase()));
+
+function handleKeys(dt) {
+  if (renderer.xr.isPresenting) return;
+  let mx = 0, mz = 0;
+  if (keys.has('a')) mx -= 1;
+  if (keys.has('d')) mx += 1;
+  if (keys.has('w')) mz -= 1;
+  if (keys.has('s')) mz += 1;
+  if (mx || mz) { rig.position.x += mx * MOVE_SPEED * dt; rig.position.z += mz * MOVE_SPEED * dt; }
+  if (keys.has('q')) rig.rotation.y += ROT_SPEED * dt;
+  if (keys.has('e')) rig.rotation.y -= ROT_SPEED * dt;
+  const up = keys.has('+') || keys.has('=');
+  const dn = keys.has('-') || keys.has('_');
+  if (up || dn) rig.scale.setScalar(clampScale(rig.scale.x * Math.exp((up ? 1 : -1) * SCALE_RATE * dt)));
+}
+
+// Shift-click the ground plane to move the splat while previewing on a desktop
+const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+const pointerRay  = new THREE.Raycaster();
+renderer.domElement.addEventListener('pointerdown', (e) => {
+  if (renderer.xr.isPresenting || e.button !== 0 || !e.shiftKey) return;
+  const nx = (e.clientX / innerWidth) * 2 - 1, ny = -(e.clientY / innerHeight) * 2 + 1;
+  pointerRay.setFromCamera(new THREE.Vector2(nx, ny), camera);
+  const hit = new THREE.Vector3();
+  if (pointerRay.ray.intersectPlane(groundPlane, hit)) rig.position.set(hit.x, 0, hit.z);
+});
+
+// ---------------------------------------------------------------------------
+// UI buttons
+// ---------------------------------------------------------------------------
+function resetTransform() {
+  rig.position.set(0, 0, 0);
+  rig.rotation.set(0, 0, 0);
+  rig.scale.setScalar(baseScale);
+  say('Reset.');
+}
+document.getElementById('b-reset').onclick = resetTransform;
+document.getElementById('b-replace').onclick = () => {
+  placing = true;
+  say(renderer.xr.isPresenting ? 'Aim at a surface and pull the trigger.' : 'Shift-click the grid to move it.');
+};
+document.getElementById('b-flip').onclick = () => {
+  flipped = !flipped;
+  if (splat.isInitialized) refit();
+  say('Up-axis ' + (flipped ? 'flipped' : 'as authored') + '.');
+};
+document.getElementById('b-onetoone').onclick = () => {
+  rig.scale.setScalar(1);
+  say('Scale 1:1 (source units treated as metres).');
+};
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// ---------------------------------------------------------------------------
+// Frame loop
+// ---------------------------------------------------------------------------
+const clock = new THREE.Clock();
+let currentFrame = null;
+
+renderer.setAnimationLoop((time, frame) => {
+  currentFrame = frame;
+  const dt = Math.min(clock.getDelta(), 0.1);
+  const refSpace = renderer.xr.getReferenceSpace();
+
+  // 1. keep the anchor node glued to the XRAnchor as tracking is refined
+  if (frame && xrAnchor && refSpace) {
+    const pose = frame.getPose(xrAnchor.anchorSpace, refSpace);
+    if (pose) {
+      const p = pose.transform.position, o = pose.transform.orientation;
+      anchorNode.position.set(p.x, p.y, p.z);
+      anchorNode.quaternion.set(o.x, o.y, o.z, o.w);
+      _v.set(0, 0, -1).applyQuaternion(anchorNode.quaternion);
+      anchorYaw = Math.atan2(-_v.x, -_v.z);
+    }
+  }
+
+  // 2. hit-test reticle
+  if (frame && hitTestSource && refSpace) {
+    const hits = frame.getHitTestResults(hitTestSource);
+    if (hits.length) {
+      const pose = hits[0].getPose(refSpace);
+      if (pose) {
+        reticle.matrix.fromArray(pose.transform.matrix);
+        const p = pose.transform.position;
+        camera.getWorldPosition(_wp);
+        lastHitPose = {
+          position: new THREE.Vector3(p.x, p.y, p.z),
+          yaw: Math.atan2(_wp.x - p.x, _wp.z - p.z),   // face the viewer
+        };
+        reticle.visible = placing;
+      }
+    } else {
+      reticle.visible = false;
+      lastHitPose = null;
+    }
+  }
+
+  // 3. manipulation
+  if (hasPlaced && pinch.active) {
+    const held = controllers.filter((x) => x.userData.grabbing);
+    if (held.length === 2) {
+      held[0].getWorldPosition(_rayO); held[1].getWorldPosition(_v);
+      const d = Math.max(_rayO.distanceTo(_v), 1e-3);
+      rig.scale.setScalar(clampScale(pinch.scale0 * (d / pinch.dist0)));
+      rig.rotation.y = pinch.yaw0 + (Math.atan2(_v.x - _rayO.x, _v.z - _rayO.z) - pinch.angle0);
+    } else {
+      pinch.active = false;
+    }
+  } else if (hasPlaced && grab.active && grab.ctrl) {
+    const c = grab.ctrl;
+    const dYaw = controllerYaw(c) - grab.ctrlYaw0;
+    c.getWorldPosition(_rayO);
+    const off = grab.offset.clone().applyAxisAngle(UP, dYaw);
+    setRigWorld(_rayO.add(off), grab.yaw0 + dYaw);
+  } else {
+    handleGamepads(dt);
+    handleKeys(dt);
+  }
+
+  if (!renderer.xr.isPresenting) controls.update();
+  renderer.render(scene, camera);
+});
+</script>
+</body>
+</html>

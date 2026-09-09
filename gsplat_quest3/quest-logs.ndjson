@@ -1,0 +1,16 @@
+{"recv":"2026-09-03T17:02:53.513Z","t":0.01,"seq":0,"level":"log","msg":"boot 2026-09-03T17:02:51.004Z"}
+{"recv":"2026-09-03T17:02:53.513Z","t":0.01,"seq":1,"level":"log","msg":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/151.0.7922.34 Safari/537.36"}
+{"recv":"2026-09-03T17:02:53.514Z","t":0.01,"seq":2,"level":"log","msg":"secureContext=true navigator.xr=true"}
+{"recv":"2026-09-03T17:02:56.008Z","t":3.29,"seq":3,"level":"xr","msg":"[boot] module loaded, three r180, spark 2.1.0"}
+{"recv":"2026-09-03T17:02:56.009Z","t":3.39,"seq":4,"level":"xr","msg":"[xr] immersive-ar supported = false"}
+{"recv":"2026-09-03T17:03:01.007Z","t":9.37,"seq":5,"level":"xr","msg":"[load] loading splatcaptspirulae.sog (lod+nonLod)"}
+{"recv":"2026-09-03T17:03:25.415Z","t":32.59,"seq":6,"level":"xr","msg":"[load] splatcaptspirulae.sog initialized, numSplats=2884015"}
+{"recv":"2026-09-03T17:03:25.415Z","t":33.27,"seq":7,"level":"xr","msg":"[fit] splatcaptspirulae.sog size=6.15x2.52x13.27 baseScale=0.397"}
+{"recv":"2026-09-03T17:10:55.845Z","t":0,"seq":0,"level":"log","msg":"boot 2026-09-03T17:10:53.341Z"}
+{"recv":"2026-09-03T17:10:55.845Z","t":0,"seq":1,"level":"log","msg":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/151.0.7922.34 Safari/537.36"}
+{"recv":"2026-09-03T17:10:55.845Z","t":0,"seq":2,"level":"log","msg":"secureContext=true navigator.xr=true"}
+{"recv":"2026-09-03T17:10:55.845Z","t":0.35,"seq":3,"level":"xr","msg":"[boot] module loaded, three r180, spark 2.1.0"}
+{"recv":"2026-09-03T17:10:55.847Z","t":0.44,"seq":4,"level":"xr","msg":"[xr] immersive-ar supported = false"}
+{"recv":"2026-09-03T17:11:00.844Z","t":6.41,"seq":5,"level":"xr","msg":"[load] loading splat.sog (lod+nonLod)"}
+{"recv":"2026-09-03T17:11:03.343Z","t":9.69,"seq":6,"level":"xr","msg":"[load] splat.sog initialized, numSplats=462429"}
+{"recv":"2026-09-03T17:11:03.343Z","t":9.86,"seq":7,"level":"xr","msg":"[fit] splat.sog size=5.80x5.04x5.52 baseScale=0.199"}

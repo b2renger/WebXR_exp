@@ -57,7 +57,101 @@
   label.chk { display:flex; align-items:center; gap:6px; font-size:12px; color:#c3cfdd; margin-top:8px; }
   #ar-btn-slot button { width:100%; margin-top:8px; min-height:38px; }
   #filepick { display:none; }
+  #logview { max-height:160px; overflow:auto; background:rgba(0,0,0,.35); border-radius:6px;
+             padding:6px 8px; font:10.5px/1.35 Consolas, monospace; color:#9fd0a8; white-space:pre-wrap;
+             word-break:break-all; margin:4px 0 0; }
 </style>
+
+<script>
+// ---------------------------------------------------------------------------
+// Remote + on-page logger. Classic script installed BEFORE the module so even
+// an import/CDN failure on the headset is captured. Batches are POSTed to
+// ./log (see serve.mjs, which appends them to quest-logs.ndjson) and mirrored
+// into the Logs panel; POST failures are silent so any static host still works.
+// ---------------------------------------------------------------------------
+(function () {
+  var t0 = Date.now(), seq = 0, buf = [], pending = [];
+  function fmt(a) {
+    if (a instanceof Error) return a.stack || (a.name + ': ' + a.message);
+    if (typeof a === 'object' && a !== null) { try { return JSON.stringify(a); } catch (e) { return String(a); } }
+    return String(a);
+  }
+  function fmtLine(e) { return e.t + 's [' + e.level + '] ' + e.msg; }
+  // Panel repaint is throttled and skipped while the <details> is closed —
+  // a per-console-line DOM rebuild would burn frame budget on the headset.
+  var renderTimer = 0;
+  function render() {
+    if (renderTimer) return;
+    renderTimer = setTimeout(function () {
+      renderTimer = 0;
+      var sect = document.getElementById('logsect');
+      var pre = document.getElementById('logview');
+      if (!pre || (sect && !sect.open)) return;
+      pre.textContent = buf.slice(-250).map(fmtLine).join('\n');
+      pre.scrollTop = pre.scrollHeight;
+    }, 300);
+  }
+  function push(level, args) {
+    var entry = { t: +((Date.now() - t0) / 1000).toFixed(2), seq: seq++, level: level,
+                  msg: Array.prototype.map.call(args, fmt).join(' ') };
+    buf.push(entry); if (buf.length > 1000) buf.shift();
+    pending.push(entry); if (pending.length > 400) pending.shift();
+    render();
+    if (level === 'error') {
+      if (window.RLOG && window.RLOG.onError) { try { window.RLOG.onError(entry.msg); } catch (e) {} }
+      else {
+        var st = document.getElementById('status');
+        if (st) { st.textContent = '⚠ ' + entry.msg.slice(0, 160); st.classList.add('err'); }
+      }
+    }
+  }
+  ['log', 'info', 'warn', 'error', 'debug'].forEach(function (m) {
+    var orig = console[m] ? console[m].bind(console) : function () {};
+    console[m] = function () { push(m === 'debug' || m === 'info' ? 'log' : m, arguments); orig.apply(null, arguments); };
+  });
+  window.addEventListener('error', function (e) {
+    push('error', [(e.message || 'error') + ' @ ' + (e.filename || '?') + ':' + (e.lineno || 0)]);
+  });
+  window.addEventListener('unhandledrejection', function (e) {
+    push('error', ['unhandledrejection: ' + fmt(e.reason)]);
+  });
+  // Remote posting stops after 5 consecutive failures (static host without /log);
+  // a failed batch is re-queued so a hiccup doesn't drop lines.
+  var postFails = 0;
+  function flush(useBeacon) {
+    if (!pending.length || postFails >= 5) return;
+    var batch = pending; pending = [];
+    var body = batch.map(function (e) { return JSON.stringify(e); }).join('\n');
+    try {
+      if (useBeacon && navigator.sendBeacon) { navigator.sendBeacon('./log', new Blob([body], { type: 'text/plain' })); return; }
+      fetch('./log', { method: 'POST', body: body, keepalive: true })
+        .then(function (r) {
+          if (r.ok) { postFails = 0; return; }
+          throw new Error('http ' + r.status);
+        })
+        .catch(function () {
+          postFails++;
+          pending = batch.concat(pending).slice(-400);
+          if (postFails === 5) push('warn', ['remote log endpoint unreachable — keeping logs on-page only (use Download)']);
+        });
+    } catch (err) {}
+  }
+  setInterval(flush, 2500);
+  window.addEventListener('pagehide', function () { flush(true); });
+  document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'hidden') flush(true); });
+  window.RLOG = {
+    log: function (tag) {
+      push(tag === 'error' ? 'error' : 'xr', ['[' + tag + '] ' + Array.prototype.slice.call(arguments, 1).map(fmt).join(' ')]);
+    },
+    dump: function () { return buf.map(fmtLine).join('\n'); },
+    flush: flush,
+    onError: null
+  };
+  push('log', ['boot ' + new Date().toISOString()]);
+  push('log', [navigator.userAgent]);
+  push('log', ['secureContext=' + window.isSecureContext + ' navigator.xr=' + !!navigator.xr]);
+})();
+</script>
 
 <script type="importmap">
 {
@@ -103,6 +197,15 @@
   <label class="chk"><input type="checkbox" id="occl" checked> Real-world occlusion (depth sensing, applies on AR entry)</label>
   <label class="chk"><input type="checkbox" id="persist-anchor" checked> Persist room anchor across sessions</label>
 
+  <details id="logsect">
+    <summary class="sect" style="cursor:pointer">Logs</summary>
+    <pre id="logview"></pre>
+    <div style="display:flex;gap:6px;margin-top:4px">
+      <button id="b-logsend" type="button">Send now</button>
+      <button id="b-logdl" type="button">Download</button>
+    </div>
+  </details>
+
   <div id="ar-btn-slot"></div>
 </div>
 
@@ -121,6 +224,23 @@ const STORE_KEY   = 'splat-placer-v2:' + location.pathname;
 
 const statusEl = document.getElementById('status');
 const say = (msg, isErr) => { statusEl.textContent = msg; statusEl.classList.toggle('err', !!isErr); hud.set(msg); };
+const L = (tag, ...a) => { if (window.RLOG) window.RLOG.log(tag, ...a); };
+
+L('boot', 'module loaded, three r' + THREE.REVISION + ', spark 2.1.0');
+
+function downloadFile(name, blob) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+document.getElementById('b-logsend').onclick = () => {
+  if (window.RLOG) { window.RLOG.flush(); say('Log flush attempted — check /logs on the server.'); }
+};
+document.getElementById('b-logdl').onclick = () => {
+  if (window.RLOG) downloadFile('splat-placer-logs.txt', new Blob([window.RLOG.dump()], { type: 'text/plain' }));
+};
 
 // ---------------------------------------------------------------------------
 // Renderer / scene / Spark
@@ -131,11 +251,22 @@ renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.setClearAlpha(0);
 renderer.xr.enabled = true;
 renderer.xr.setReferenceSpaceType('local-floor');
+// Manual XR camera updates: when Quest's depth module reports depthFar=Infinity,
+// three propagates it into the camera projections and they go NaN (three#29098).
+// We update manually each frame and repair the matrices before rendering.
+renderer.xr.cameraAutoUpdate = false;
 document.body.appendChild(renderer.domElement);
 
 const scene  = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.01, 200);
+const DESKTOP_CAM = { fov: 60, near: 0.01, far: 200 };
+const camera = new THREE.PerspectiveCamera(DESKTOP_CAM.fov, window.innerWidth / window.innerHeight, DESKTOP_CAM.near, DESKTOP_CAM.far);
 camera.position.set(0, 1.6, 2.2);
+function resetDesktopCamera() {
+  camera.fov = DESKTOP_CAM.fov; camera.zoom = 1;
+  camera.near = DESKTOP_CAM.near; camera.far = DESKTOP_CAM.far;
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+}
 
 // LOD-aware Spark renderer. Budget defaults are platform-aware (500-750K splats
 // in WebXR, 2.5M desktop); the cone foveation defaults spend the budget where
@@ -247,8 +378,10 @@ class PlacedItem {
 
     this._fitTries = 0;
     this._fitted = false;
+    L('load', 'loading', asset.name, '(' + (opts.paged ? 'paged/streamed' : 'lod+nonLod') + ')');
     this.ready = this.splat.initialized.then(() => {
       this.loaded = true;
+      L('load', asset.name, 'initialized, numSplats=' + (this.splat.numSplats || 0));
       this.scheduleRefit();
       saveLayout();
     }).catch((err) => {
@@ -282,6 +415,7 @@ class PlacedItem {
     this.baseScale = TARGET_H / size.y;
     // auto-scale to TARGET_H once, on the first real fit; never stomp a user/restored scale
     if (good && !this._fitted && !this._restored) this.rig.scale.setScalar(this.baseScale);
+    if (good && !this._fitted) L('fit', this.asset.name, 'size=' + size.x.toFixed(2) + 'x' + size.y.toFixed(2) + 'x' + size.z.toFixed(2), 'baseScale=' + this.baseScale.toFixed(3));
     if (good) this._fitted = true;
     this.localBounds.setFromCenterAndSize(
       new THREE.Vector3(0, size.y / 2, 0),
@@ -377,9 +511,8 @@ function loadLayout() {
 document.getElementById('b-delete').onclick = () => { if (selected) { selected.remove(); saveLayout(); say('Deleted.'); } };
 document.getElementById('b-clear').onclick  = () => { [...items].forEach((i) => i.remove()); saveLayout(); say('Cleared.'); };
 document.getElementById('b-export').onclick = () => {
-  const blob = new Blob([localStorage.getItem(STORE_KEY) || '{"items":[]}'], { type: 'application/json' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob); a.download = 'splat-layout.json'; a.click();
+  downloadFile('splat-layout.json',
+    new Blob([localStorage.getItem(STORE_KEY) || '{"items":[]}'], { type: 'application/json' }));
 };
 document.getElementById('b-import').onclick = () => document.getElementById('importpick').click();
 document.getElementById('importpick').onchange = async (e) => {
@@ -407,10 +540,12 @@ const hud = (() => {
   mesh.position.set(0, 0.04, -0.06);
   mesh.rotation.x = -0.6;
   let lastMsg = '';
-  function draw() {
+  function draw() { try { drawInner(); } catch (e) {} }   // resilient to early calls
+  function drawInner() {
     ctx.clearRect(0, 0, 512, 96);
     ctx.fillStyle = 'rgba(10,14,20,0.72)';
-    ctx.beginPath(); ctx.roundRect(0, 0, 512, 96, 20); ctx.fill();
+    if (ctx.roundRect) { ctx.beginPath(); ctx.roundRect(0, 0, 512, 96, 20); ctx.fill(); }
+    else ctx.fillRect(0, 0, 512, 96);
     ctx.fillStyle = '#cfe3ff'; ctx.font = '600 30px sans-serif';
     ctx.fillText((placing ? '▸ PLACE: ' + (library[currentAsset] ? library[currentAsset].name : '') : lastMsg).slice(0, 30), 18, 40);
     ctx.fillStyle = '#8fa2b8'; ctx.font = '24px sans-serif';
@@ -430,44 +565,74 @@ arBtn.textContent = 'Checking AR support…'; arBtn.disabled = true;
 document.getElementById('ar-btn-slot').appendChild(arBtn);
 let arSession = null;
 
-function arInit(withFloor) {
+function arInit(withFloor, withDepth) {
   const init = {
     requiredFeatures: withFloor ? ['hit-test', 'local-floor'] : ['hit-test'],
     optionalFeatures: ['anchors', 'plane-detection', 'hand-tracking'],
   };
-  if (document.getElementById('occl').checked) {
+  if (withDepth) {
     init.optionalFeatures.push('depth-sensing');
     // gpu-optimized => three r180 auto-renders a depth-priming pass each frame,
-    // so real-world geometry occludes the splats (no extra code needed)
-    init.depthSensing = { usagePreference: ['gpu-optimized'], dataFormatPreference: [] };
+    // so real-world geometry occludes the splats. The resulting NaN projection
+    // matrices (Quest reports depthFar=Infinity, three#29098) are repaired in
+    // the frame loop.
+    init.depthSensing = { usagePreference: ['gpu-optimized'], dataFormatPreference: ['float32', 'luminance-alpha', 'unsigned-short'] };
   }
   return init;
 }
 
 if (navigator.xr) {
   navigator.xr.isSessionSupported('immersive-ar').then((ok) => {
+    L('xr', 'immersive-ar supported =', ok);
     arBtn.disabled = !ok;
     arBtn.textContent = ok ? 'Enter AR' : 'AR not supported on this device';
-  }).catch(() => { arBtn.textContent = 'AR unavailable'; });
+  }).catch((e) => { L('xr', 'isSessionSupported threw:', e); arBtn.textContent = 'AR unavailable'; });
 } else {
-  arBtn.textContent = 'WebXR unavailable (needs HTTPS)';
+  L('xr', 'navigator.xr missing — not a secure context, or no WebXR');
+  arBtn.textContent = 'WebXR unavailable (needs HTTPS or adb-reverse localhost)';
 }
 
 arBtn.onclick = async () => {
   if (arSession) { arSession.end(); return; }
-  let session;
-  try {
-    session = await navigator.xr.requestSession('immersive-ar', arInit(true));
-    renderer.xr.setReferenceSpaceType('local-floor');
-  } catch (e) {
+  const wantDepth = document.getElementById('occl').checked;
+  // Short ladder: optional features can't reject a session per spec, so the only
+  // realistic retries are the depthSensing dict throwing (strict WebIDL) and
+  // 'local-floor' being unsupported. Retries can lose the click's transient
+  // user activation on some browsers — a SecurityError means "click again".
+  const ladder = [{ floor: true, depth: wantDepth, label: wantDepth ? 'floor+depth' : 'floor' }];
+  if (wantDepth) ladder.push({ floor: true, depth: false, label: 'floor' });
+  ladder.push({ floor: false, depth: false, label: 'base' });
+
+  let session = null, lastErr = null;
+  for (const a of ladder) {
     try {
-      session = await navigator.xr.requestSession('immersive-ar', arInit(false));
-      renderer.xr.setReferenceSpaceType('local');
-    } catch (e2) { say('Could not start AR: ' + (e2.message || e2), true); return; }
+      L('xr', 'requestSession attempt:', a.label);
+      session = await navigator.xr.requestSession('immersive-ar', arInit(a.floor, a.depth));
+      renderer.xr.setReferenceSpaceType(a.floor ? 'local-floor' : 'local');
+      L('xr', 'session granted via', a.label, '| refSpace', a.floor ? 'local-floor' : 'local');
+      break;
+    } catch (e) {
+      lastErr = e;
+      L('xr', 'attempt', a.label, 'failed:', e);
+      if (e && e.name === 'SecurityError') {
+        say('AR request needs a fresh click — press Enter AR again.', true);
+        return;
+      }
+    }
   }
+  if (!session) { say('Could not start AR: ' + ((lastErr && lastErr.message) || lastErr), true); return; }
+
   arSession = session;
+  L('xr', 'enabledFeatures =', session.enabledFeatures ? [...session.enabledFeatures].join(',') : '(n/a)');
+  L('xr', 'environmentBlendMode =', session.environmentBlendMode);
   session.addEventListener('end', () => { arSession = null; arBtn.textContent = 'Enter AR'; });
-  await renderer.xr.setSession(session);
+  try {
+    await renderer.xr.setSession(session);
+  } catch (e) {
+    console.error('renderer.xr.setSession failed:', e);
+    say('setSession failed — see Logs.', true);
+    return;
+  }
   arBtn.textContent = 'Exit AR';
 };
 
@@ -481,10 +646,13 @@ reticle.matrixAutoUpdate = false; reticle.visible = false; reticle.renderOrder =
 scene.add(reticle);
 
 let hitTestSource = null;
-let placing = false;         // reticle live; trigger places currentAsset
-let roomAnchored = false;    // anchorNode is pinned to a real pose this session
+let placing = false;          // reticle live; trigger places currentAsset
+let roomAnchored = false;     // anchorNode is pinned to a real pose this session
+let restorePending = false;   // persisted anchor restored, waiting for its first pose
+let restoreDeadline = 0;      // ms timestamp: give up waiting for the restored pose
 let xrAnchor = null;
-let lastHitPose = null;      // { position(world), yaw }
+let lastHitPose = null;       // { position(world), yaw }
+const ANCHOR_PROMPT = () => items.length ? 'Trigger on a surface to anchor your layout.' : 'Aim at a surface, trigger to place.';
 
 function setAnchorPose(position, yaw) {
   anchorNode.position.copy(position);
@@ -496,12 +664,16 @@ function setAnchorPose(position, yaw) {
 async function makeRoomAnchor(position, yaw, frame) {
   setAnchorPose(position, yaw);
   const refSpace = renderer.xr.getReferenceSpace();
-  if (!(frame && refSpace && typeof frame.createAnchor === 'function')) return;
+  if (!(frame && refSpace && typeof frame.createAnchor === 'function')) {
+    L('anchor', 'createAnchor unavailable — layout uses a fixed pose this session');
+    return;
+  }
   try {
     const q = anchorNode.quaternion;
     xrAnchor = await frame.createAnchor(new XRRigidTransform(
       { x: position.x, y: position.y, z: position.z, w: 1 },
       { x: q.x, y: q.y, z: q.z, w: q.w }), refSpace);
+    L('anchor', 'room anchor created');
     if (document.getElementById('persist-anchor').checked &&
         typeof xrAnchor.requestPersistentHandle === 'function') {
       try {
@@ -509,50 +681,81 @@ async function makeRoomAnchor(position, yaw, frame) {
           arSession.deletePersistentAnchor(persistedAnchorUUID).catch(() => {});
         }
         persistedAnchorUUID = await xrAnchor.requestPersistentHandle();
+        L('anchor', 'persistent handle =', persistedAnchorUUID);
         saveLayout();
-      } catch (e) { console.warn('persistent anchor failed', e); }
+      } catch (e) { L('anchor', 'requestPersistentHandle failed:', e); }
+    } else {
+      L('anchor', 'persistence off or requestPersistentHandle unsupported');
     }
-  } catch (e) { console.warn('anchor failed', e); }
+  } catch (e) { L('anchor', 'createAnchor failed:', e); }
 }
 
 renderer.xr.addEventListener('sessionstart', async () => {
   const session = renderer.xr.getSession();
-  grid.visible = false;
-  controls.enabled = false;
-  renderer.xr.setFoveation(0.3);
-  roomAnchored = false;
-  xrAnchor = null;
-  anchorNode.visible = false;
-  placing = items.length === 0;   // empty room: jump straight into placing
-  hud.refresh();
-
-  // try to restore the persisted room anchor => layout reappears in place
-  if (persistedAnchorUUID && typeof session.restorePersistentAnchor === 'function') {
-    try {
-      xrAnchor = await session.restorePersistentAnchor(persistedAnchorUUID);
-      roomAnchored = true;             // pose applied each frame from the anchor
-      anchorNode.visible = true;
-      say('Layout restored to the room.');
-    } catch (e) {
-      console.warn('restorePersistentAnchor failed', e);
-      say(items.length ? 'Trigger on a surface to anchor your layout.' : 'Aim at a surface, trigger to place.');
-    }
-  } else {
-    say(items.length ? 'Trigger on a surface to anchor your layout.' : 'Aim at a surface, trigger to place.');
-  }
-
+  const live = () => renderer.xr.getSession() === session;   // guard awaits against session end
   try {
-    const viewerSpace = await session.requestReferenceSpace('viewer');
-    hitTestSource = await session.requestHitTestSource({ space: viewerSpace });
+    L('xr', 'sessionstart');
+    grid.visible = false;
+    controls.enabled = false;
+    renderer.xr.setFoveation(0.3);
+    roomAnchored = false;
+    restorePending = false;
+    xrAnchor = null;
+    anchorNode.visible = false;
+    placing = items.length === 0;   // empty room: jump straight into placing
+    hud.refresh();
+
+    // probe depth sensing a moment in (the texture only exists once frames flow)
+    setTimeout(() => {
+      if (!live()) return;
+      try { L('xr', 'hasDepthSensing =', renderer.xr.hasDepthSensing()); } catch (e) { L('xr', 'hasDepthSensing threw:', e); }
+    }, 2000);
+
+    // hit-test source FIRST — never starve it behind a slow anchor restore
+    try {
+      const viewerSpace = await session.requestReferenceSpace('viewer');
+      if (!live()) return;
+      hitTestSource = await session.requestHitTestSource({ space: viewerSpace });
+      if (!live()) { hitTestSource = null; return; }
+      L('xr', 'hit-test source ready');
+    } catch (err) {
+      if (!live()) return;
+      L('xr', 'hit-test unavailable:', err);
+      say('Hit-test unavailable — anchoring 1.5 m ahead.', true);
+      setAnchorPose(new THREE.Vector3(0, 0, -1.5), 0);
+      anchorNode.visible = true;
+    }
+
+    // restore the persisted room anchor without blocking; the frame loop flips
+    // roomAnchored/visibility when the first pose arrives, or gives up at the
+    // deadline. While restorePending, the trigger must NOT re-anchor (it would
+    // delete the persisted anchor).
+    if (persistedAnchorUUID && typeof session.restorePersistentAnchor === 'function') {
+      restorePending = true;
+      restoreDeadline = performance.now() + 8000;
+      say('Restoring layout to the room…');
+      session.restorePersistentAnchor(persistedAnchorUUID).then((a) => {
+        if (!live()) return;
+        xrAnchor = a;
+        L('anchor', 'restorePersistentAnchor OK', persistedAnchorUUID);
+      }).catch((e) => {
+        if (!live()) return;
+        restorePending = false;
+        L('anchor', 'restorePersistentAnchor failed:', e);
+        say(ANCHOR_PROMPT());
+      });
+    } else {
+      L('anchor', 'no persisted anchor (uuid=' + persistedAnchorUUID + ', api=' +
+        (typeof session.restorePersistentAnchor === 'function') + ')');
+      say(ANCHOR_PROMPT());
+    }
   } catch (err) {
-    console.warn('hit-test unavailable', err);
-    say('Hit-test unavailable — anchoring 1.5 m ahead.', true);
-    setAnchorPose(new THREE.Vector3(0, 0, -1.5), 0);
-    anchorNode.visible = true;
+    console.error('sessionstart handler failed:', err);
   }
 });
 
 renderer.xr.addEventListener('sessionend', () => {
+  L('xr', 'sessionend');
   hitTestSource = null;
   xrAnchor = null;   // keep persistedAnchorUUID: it outlives the session
   grid.visible = true;
@@ -562,8 +765,12 @@ renderer.xr.addEventListener('sessionend', () => {
   anchorNode.quaternion.identity();
   anchorYaw = 0;
   roomAnchored = false;
+  restorePending = false;
   reticle.visible = false;
   placing = false;
+  // the XR session stomps the user camera's projection (worse with depth
+  // sensing, three#29098) — rebuild the desktop projection from one source
+  resetDesktopCamera();
   say('Left AR.');
 });
 
@@ -610,8 +817,10 @@ function itemUnderRay(c) {
 }
 
 function onTrigger(c) {
-  // a surface hit while placing — or before the layout is anchored — consumes the trigger
-  if (lastHitPose && (placing || !roomAnchored)) { placeOrAnchorAtHit(); return; }
+  // a surface hit while placing — or before the layout is anchored — consumes the
+  // trigger. While a persisted-anchor restore is pending, re-anchoring is blocked:
+  // it would delete the persisted anchor mid-restore.
+  if (lastHitPose && (placing || (!roomAnchored && !restorePending))) { placeOrAnchorAtHit(); return; }
   const it = itemUnderRay(c);
   if (it) selectItem(it);
 }
@@ -810,11 +1019,49 @@ addEventListener('resize', () => {
 // ---------------------------------------------------------------------------
 const clock = new THREE.Clock();
 let currentFrame = null;
+let nanFixLogged = false;
+let hb = { frames: 0, last: 0 };   // heartbeat: fps + state every 5s while presenting
 
 renderer.setAnimationLoop((time, frame) => {
   currentFrame = frame;
   const dt = Math.min(clock.getDelta(), 0.1);
   const refSpace = renderer.xr.getReferenceSpace();
+
+  if (renderer.xr.isPresenting) {
+    // Manual camera update (cameraAutoUpdate=false), then repair the NaN that
+    // three's stereo-union projection gets when Quest reports depthFar=Infinity
+    // (three#29098) — Spark's sort/LOD and frustum culling read these matrices.
+    // Only the depth column ([10]/[14]) goes NaN; the union frustum shape is
+    // valid, so patch just those two elements from a per-view matrix (which is
+    // a finite infinite-far form straight from WebXR).
+    renderer.xr.updateCamera(camera);
+    const xrCam = renderer.xr.getCamera();
+    const pe = xrCam.projectionMatrix.elements;
+    if (!isFinite(pe[10]) || !isFinite(pe[14])) {
+      const src = xrCam.cameras.length ? xrCam.cameras[0].projectionMatrix.elements : null;
+      if (src && isFinite(src[10]) && isFinite(src[14])) { pe[10] = src[10]; pe[14] = src[14]; }
+      else { pe[10] = -1; pe[14] = -0.2; }   // infinite-far form with near≈0.1
+      xrCam.projectionMatrixInverse.copy(xrCam.projectionMatrix).invert();
+      camera.projectionMatrix.copy(xrCam.projectionMatrix);
+      camera.projectionMatrixInverse.copy(xrCam.projectionMatrixInverse);
+      if (!nanFixLogged) { nanFixLogged = true; L('fix', 'repaired NaN depth column in union projection (three#29098)'); }
+    }
+
+    // persisted-anchor restore that never localizes: stop waiting at the deadline
+    if (restorePending && !roomAnchored && performance.now() > restoreDeadline) {
+      restorePending = false;
+      L('anchor', 'restored anchor never localized within 8s');
+      say('Saved anchor not found here — trigger on a surface to re-anchor.');
+    }
+
+    hb.frames++;
+    if (time - hb.last > 5000) {
+      if (hb.last) L('hb', 'fps=' + (hb.frames / ((time - hb.last) / 1000)).toFixed(1),
+        'items=' + items.length, 'anchored=' + roomAnchored, 'placing=' + placing,
+        'splats=' + items.map((i) => i.splat.numSplats || 0).join('/'));
+      hb.last = time; hb.frames = 0;
+    }
+  }
 
   // keep the room anchor glued to its real pose
   if (frame && xrAnchor && refSpace) {
@@ -825,13 +1072,23 @@ renderer.setAnimationLoop((time, frame) => {
       anchorNode.quaternion.set(o.x, o.y, o.z, o.w);
       _v.set(0, 0, -1).applyQuaternion(anchorNode.quaternion);
       anchorYaw = Math.atan2(-_v.x, -_v.z);
-      if (!roomAnchored) { roomAnchored = true; anchorNode.visible = true; }
+      if (!roomAnchored) {
+        roomAnchored = true;
+        anchorNode.visible = true;
+        if (restorePending) {
+          restorePending = false;
+          L('anchor', 'restored anchor localized');
+          say('Layout restored to the room.');
+        }
+        hud.refresh();
+      }
     }
   }
 
-  // hit-test reticle (visible while placing, or before the room is anchored)
+  // hit-test reticle (visible while placing, or before the room is anchored —
+  // but not while a persisted-anchor restore is still pending)
   if (frame && hitTestSource && refSpace) {
-    const wantReticle = placing || !roomAnchored;
+    const wantReticle = placing || (!roomAnchored && !restorePending);
     const hits = frame.getHitTestResults(hitTestSource);
     if (hits.length && wantReticle) {
       const pose = hits[0].getPose(refSpace);
@@ -877,6 +1134,9 @@ renderer.setAnimationLoop((time, frame) => {
 // ---------------------------------------------------------------------------
 loadLayout();
 if (!items.length) say('Add splats to the library, then place them (AR: trigger on a surface, desktop: shift-click).');
+
+// route logger-captured errors into the status line AND the in-headset HUD
+if (window.RLOG) window.RLOG.onError = (msg) => say('⚠ ' + msg.slice(0, 160), true);
 
 // debug hook for automated tests / console poking
 window.__placer = { items, library, get selected() { return selected; }, keys };

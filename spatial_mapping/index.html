@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#101918">
+  <title>Spatial Mapping — room laboratory</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="./style.css">
+  <script type="importmap">
+    {"imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/",
+      "rapier": "https://cdn.jsdelivr.net/npm/@dimforge/rapier3d-compat@0.17.3/rapier.es.js"
+    }}
+  </script>
+</head>
+<body>
+  <div id="viewport" aria-label="Interactive room preview"></div>
+  <main id="ui">
+    <div class="eyebrow"><span class="dot"></span> WEBXR EXPERIMENT / 01</div>
+    <h1>Spatial<br><span>Mapping.</span></h1>
+    <p class="intro">Turn the room around you into a surface for light and play.</p>
+    <button id="enter" class="primary" disabled>Loading laboratory…</button>
+    <p id="status" role="status">Loading Three.js and physics from the CDN…</p>
+    <div class="readouts">
+      <div><strong id="surfaces">0</strong><span>surfaces</span></div>
+      <div><strong id="triangles">0</strong><span>triangles</span></div>
+      <div><strong id="balls">0</strong><span>balls</span></div>
+    </div>
+    <label for="mode">SURFACE VIEW</label>
+    <select id="mode">
+      <option value="relight">Light overlay</option>
+      <option value="solid">Virtual room</option>
+      <option value="scan">Scan tint</option>
+      <option value="hidden">Passthrough + occlusion</option>
+      <option value="tear">Reality ↔ Mesh</option>
+    </select>
+    <div id="tear-controls" hidden>
+      <p id="tear-state">Reality. Start with hands close, pinch both, pull apart, then release.</p>
+      <div class="actions"><button id="tear-toggle">Tear into mesh</button><button id="tear-reset">Return to reality</button></div>
+      <p>Controllers: hold both triggers and pull apart. Desktop: use the button to preview the transition.</p>
+    </div>
+    <div class="row"><label for="strength">LIGHT STRENGTH</label><output id="strength-value">65%</output></div>
+    <input id="strength" type="range" min="0" max="1" step="0.05" value="0.65">
+    <div class="row"><label for="dim">SURFACE DIMMING</label><output id="dim-value">20%</output></div>
+    <input id="dim" type="range" min="0" max="0.8" step="0.05" value="0.2">
+    <div id="palette" aria-label="Light color">
+      <button data-color="0" style="--swatch:#6dffe0" aria-label="Mint" aria-pressed="true"></button>
+      <button data-color="1" style="--swatch:#ffb768" aria-label="Amber" aria-pressed="false"></button>
+      <button data-color="2" style="--swatch:#b49aff" aria-label="Violet" aria-pressed="false"></button>
+      <button data-color="3" style="--swatch:#ff7298" aria-label="Rose" aria-pressed="false"></button>
+    </div>
+    <label class="check"><input id="wire" type="checkbox" checked> Show triangle wireframe</label>
+    <div class="actions">
+      <button id="throw">Launch ball</button><button id="pin">Pin light</button>
+      <button id="capture" disabled>Set up room</button><button id="clear">Clear balls</button>
+      <button id="export" class="wide">Download sample room (.obj)</button>
+    </div>
+    <details><summary>Controls & setup</summary>
+      <p><b>Quest 3:</b> use the standalone Meta Quest Browser. Enter AR and allow spatial data access. If no surfaces appear, use Set up room or run Space Setup in the headset settings.</p>
+      <p><b>Trigger:</b> point at the floating menu to choose an action, or elsewhere to launch a ball.<br><b>Right grip:</b> pin / unpin light.<br><b>Left grip:</b> bring menu in front of you.</p>
+      <p><b>Desktop:</b> drag to orbit, scroll to zoom. The room is synthetic; it previews the same rendering and physics used in AR.</p>
+      <p><b>Reality ↔ Mesh:</b> pinch both hands or hold both controller triggers with your hands close together, pull apart, then release. Repeat to return. The floating menu also has Tear / Return buttons.</p>
+      <p>Light overlay colors and dims scanned surfaces. Virtual room replaces those surfaces with lit geometry. Neither removes the lighting already present in the camera image.</p>
+      <p><a href="./README.md">Implementation & next steps ↗</a></p>
+    </details>
+    <details><summary>Diagnostics</summary><pre id="diagnostics">Waiting for startup…</pre></details>
+  </main>
+  <aside id="preview-note"><span class="dot"></span> DESKTOP SAMPLE ROOM <small>Drag to explore · Enter AR to use your real room</small></aside>
+  <script>
+    window.addEventListener('error', e => { document.getElementById('status').textContent = 'Error: ' + e.message; });
+    window.addEventListener('unhandledrejection', e => { document.getElementById('status').textContent = 'Error: ' + (e.reason?.message || e.reason); });
+  </script>
+  <script type="module">
+    import('./app.js').catch(error => {
+      document.getElementById('status').textContent = 'Startup failed: ' + error.message + '. Check your connection and reload.';
+      document.getElementById('enter').textContent = 'Reload to retry';
+      document.getElementById('diagnostics').textContent = error.stack || String(error);
+      console.error(error);
+    });
+  </script>
+</body>
+</html>

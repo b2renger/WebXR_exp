@@ -1,0 +1,43 @@
+:root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; color: #edf3ef; background: #101918; }
+* { box-sizing: border-box; }
+body { margin: 0; }
+#viewport { position: fixed; inset: 0; }
+canvas { display: block; touch-action: none; }
+#ui { position: fixed; inset: 20px auto 20px 20px; width: 320px; overflow: auto; padding: 25px; border: 1px solid #31413d; border-radius: 20px; background: #111b19f0; scrollbar-width: thin; }
+.eyebrow { font-size: 10px; letter-spacing: .14em; color: #a8c3b6; }
+.dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #afffcf; margin-right: 7px; }
+h1 { font-size: 44px; line-height: 1.02; font-weight: 550; letter-spacing: -.055em; margin: 24px 0 18px; }
+h1 span { color: #b9edc7; }
+p { font-size: 12px; line-height: 1.65; color: #a8bcb2; }
+.intro { max-width: 230px; margin-bottom: 22px; }
+button, select { font: inherit; font-size: 12px; border: 1px solid #3b5148; border-radius: 8px; background: #22342c; color: #edf3ef; padding: 11px 10px; cursor: pointer; }
+button:hover { background: #365441; }
+button:disabled { opacity: .45; cursor: default; }
+button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid #b9edc7; outline-offset: 3px; }
+.primary { width: 100%; background: #c7f5a0; color: #182419; border: 0; font-weight: 700; }
+.primary:hover { background: #d9ffbb; }
+#status { min-height: 38px; font-size: 11px; }
+.readouts { display: grid; grid-template-columns: repeat(3, 1fr); border-block: 1px solid #2d4137; margin: 18px 0; padding: 14px 0; }
+.readouts strong { display: block; font-size: 22px; font-weight: 500; }
+.readouts span { font-size: 10px; color: #89a494; }
+label, output { font-size: 10px; letter-spacing: .09em; color: #a8bcb2; }
+select { display: block; width: 100%; margin: 8px 0 18px; }
+.row { display: flex; justify-content: space-between; align-items: center; margin-top: 12px; }
+input[type=range] { width: 100%; margin: 10px 0 12px; accent-color: #c7f5a0; }
+#palette { display: flex; gap: 12px; margin: 8px 0 17px; }
+#palette button { background: var(--swatch); border: 3px solid #17251d; border-radius: 50%; width: 28px; height: 28px; padding: 0; }
+#palette button[aria-pressed=true] { outline: 1px solid #efffed; outline-offset: 2px; }
+.check { display: flex; gap: 8px; align-items: center; font-size: 12px; letter-spacing: 0; }
+input[type=checkbox] { accent-color: #c7f5a0; }
+.actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 18px 0; }
+.wide { grid-column: 1 / -1; }
+details { border-top: 1px solid #2d4137; padding: 12px 0; font-size: 11px; color: #a8bcb2; }
+summary { cursor: pointer; }
+a { color: #c7f5a0; }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 10px; }
+#preview-note { position: fixed; bottom: 30px; left: 380px; font-size: 10px; letter-spacing: .13em; color: #b7cfbe; pointer-events: none; }
+#preview-note small { display: block; margin-top: 8px; color: #789889; letter-spacing: 0; }
+body.xr #preview-note { display: none; }
+body.xr #ui { display: none; }
+/* A real 3D menu is used in XR, so DOM overlay support is unnecessary. */
+@media (max-width: 700px) { #ui { inset: auto 12px 12px; width: auto; max-height: 53vh; padding: 20px; } h1 { font-size: 32px; margin: 12px 0; } h1 br { display: none; } h1 span { margin-left: 8px; } .intro { max-width: none; } #preview-note { top: 20px; bottom: auto; left: 20px; } }

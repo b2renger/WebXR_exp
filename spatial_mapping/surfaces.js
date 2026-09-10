@@ -81,7 +81,8 @@ export class Surfaces {
     this.physics = physics;
     this.records = new Map();
     this.material = createSurfaceMaterial(tearUniforms);
-    this.depthMaterial = new THREE.MeshBasicMaterial({ side: THREE.DoubleSide, colorWrite: false });
+    this.depthMaterial = new THREE.MeshBasicMaterial({ side: THREE.DoubleSide, colorWrite: false,
+      polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 });
     this.wireMaterial = new THREE.MeshBasicMaterial({ color: '#9cf4c7', wireframe: true,
       transparent: true, opacity: 0.18, depthWrite: false });
     this.tearEnabled = { value: 0 };

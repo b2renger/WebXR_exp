@@ -2,6 +2,27 @@
 
 A static Three.js + WebXR room laboratory for Quest 3. No bundler, npm install, framework, backend, or build step. Open `index.html` through a web server. Three.js **0.180.0** and Rapier **0.17.3** load as pinned ES modules from jsDelivr; Rapier's compat module embeds its WASM.
 
+## Reality → Mesh → Reality
+
+The **Reality ↔ Mesh** surface view recreates the interaction described in the reference video: tear a window into a cyan wireframe room, expand it to fill the view, and tear back to passthrough.
+
+1. Enter AR and obtain a room scan. First inspect alignment in **Scan tint**.
+2. Select **Reality ↔ Mesh** in the Surface View dropdown or cycle **View** in the floating menu.
+3. Bring both hands within about 35 cm of each other, in front of you. Pinch thumb and index finger on both hands. With controllers, hold both triggers instead.
+4. Pull your hands apart while holding the pinches/triggers. The tear stays anchored where it began; the opening grows with your hand separation.
+5. Release after the headset menu reports at least **50%** to complete the switch. This takes about 28 cm of additional separation. Release earlier to close the tear.
+6. Repeat the same gesture in mesh mode to return to reality.
+
+You can also use **Tear into mesh / Tear back to reality** in the menu, or **Return to reality** for an immediate reset. Those buttons work when hand tracking is unavailable. On desktop the warm-colored synthetic room substitutes for the real camera view; use the tear button to preview the effect.
+
+The session requests optional `hand-tracking`. Joint poses drive pinch detection with separate close/release thresholds to tolerate tracking noise. Inside the mesh region, simple light-blue joint-and-bone hand representations replace the otherwise hidden camera hands. These are procedural approximations, not skinned hand models. Menu selection consumes the pinch/trigger so it does not also start a tear. Hand-pinch thresholds and runtime input behavior still need testing on a Quest.
+
+**How the illusion works:** the same spatial mask drives the room material, its cyan triangle edges, a dark background, and the virtual hands. Outside the mesh region the app preserves transparent pixels, exposing the compositor's passthrough. The mask is evaluated from each eye through one aperture anchored in world coordinates. Once the tear grows large, it expands across the whole view; the reverse transition opens passthrough through the mesh.
+
+There is no texture capture, remeshing, or triangle cutting during the gesture. It is a rendering transition over the existing room reconstruction, with unchanged collider geometry. The dark background also covers gaps in the scan. Balls are cleared and launching is disabled in this mode so they do not interfere with the transition. Tracking/visibility loss and reference-space resets return the effect to reality. This is an expanding aperture rather than a physically simulated sheet or persistent, arbitrarily shaped holes.
+
+The desktop sample has only 120 triangles. A dense reconstruction like the hall in the video depends on the geometry supplied by the Quest scan; plane fallback will be much simpler. The effect does not invent scanned detail.
+
 ## Try it
 
 ### GitHub Pages
@@ -17,7 +38,7 @@ All app paths are relative, so repository subpaths work. No Actions build is nee
 3. Look around for the floating green menu and detected surfaces. If none appear, select **Set up room**. If that does not work, exit AR and run the headset's **Space Setup / room setup** in Settings, then re-enter. Settings names vary with OS version.
 4. Choose **Scan tint** to inspect alignment, then **Light overlay**. Move your right controller near the floor, walls, and furniture.
 5. Pull a trigger away from the menu to launch a ball. It should bounce on scanned geometry.
-6. Choose **Virtual room** to replace scanned surfaces with an opaque, virtually lit material.
+6. Choose **Virtual room** for relighting, or **Reality ↔ Mesh** for the two-hand tear interaction described above.
 7. Choose **Exit AR / keep scan**, then **Download captured room (.obj)** in the browser UI. The export is in meters with surface transforms baked in.
 
 The app requests mesh and plane detection as optional features, so AR can still start if spatial mapping is unavailable. The floating status and Diagnostics explain whether data is arriving. Missing data is never substituted with the synthetic desktop room in AR.
@@ -45,13 +66,13 @@ Then open `http://localhost:8450` **inside the Quest browser**. Loopback is trea
 | Input | Action |
 | --- | --- |
 | Trigger pointed at a menu button | Activate that button |
-| Trigger elsewhere | Launch a ball along the controller ray |
+| Trigger elsewhere | Launch a ball in lab views; hold both triggers to tear in Reality ↔ Mesh |
 | Right controller motion | Move the virtual light |
-| Right grip | Pin/unpin the light in room coordinates |
+| Right grip | Pin/unpin the light in lab views |
 | Left grip | Bring the floating menu in front of you |
 | Menu | Surface view, color, strength, dimming, wireframe, room capture, clear balls, launch, exit |
 
-Touch controllers are the intended input. Hand interactions are not implemented. The menu is actual 3D geometry, so it works without WebXR DOM Overlay support.
+Touch controllers support the lighting/physics lab and the tear mode. Optional hand tracking supports two-hand pinches in tear mode; the browser's hand-selection ray can operate the floating menu. The menu is actual 3D geometry, so it works without WebXR DOM Overlay support. Left grip recentering is a controller shortcut; hand-only users can turn back toward the menu.
 
 ## What “reconstructing the physical space” means here
 
@@ -63,7 +84,7 @@ There are three related but different sources of geometry:
 
 This app implements the first route. It does **not** read a raw depth sensor, run SLAM, fuse a TSDF volume, texture the scan, or rebuild furniture continuously as it moves. A scene mesh may be approximate, incomplete, or stale. Rescan when you move furniture. Mesh density and semantic labels are determined by the runtime.
 
-The linked [X post](https://x.com/xbh_artist/status/2097636623294890414) was inaccessible during implementation, so this project does not attribute a particular algorithm or framework to its author.
+The supplied text and video description of the [X post](https://x.com/xbh_artist/status/2097636623294890414) identify a Quest 3 / Unity demo, inspired by Lucas Martinic, with a Reality → Mesh → Reality interaction. They do not reveal whether its geometry comes from Meta's scene mesh, another live reconstruction pipeline, or a previously captured scan. Using an aligned room mesh plus a gesture-controlled reveal is an implementation inference, not a claim about the author's exact code.
 
 ### Data flow
 
@@ -112,6 +133,7 @@ The app prefers localized meshes to planes, avoiding overlapping collision surfa
 | Virtual room | Opaque geometry with neutral material and the synthetic light; hides the real textures on those surfaces |
 | Scan tint | Translucent green surface inspection |
 | Passthrough + occlusion | No visible room material or wireframe; the room still hides virtual objects behind its geometry |
+| Reality ↔ Mesh | Tear between passthrough and an opaque cyan wireframe room; repeat to return |
 
 In every view, the room first writes depth with `colorWrite = false`. The visible material and balls then respect that depth. This provides **static mesh occlusion**, not live depth occlusion of moving hands or people.
 
@@ -136,7 +158,9 @@ Useful next steps, in order:
 | `app.js` | Scene, XR session lifecycle, input, light, desktop preview, exports |
 | `surfaces.js` | Mesh/plane lifecycle, transforms, triangulation, depth/lighting materials, sample room, OBJ serialization |
 | `physics.js` | Rapier world, fixed triangle colliders, dynamic balls, cleanup |
-| `xr-menu.js` | Canvas-textured in-world menu and controller ray interaction |
+| `xr-menu.js` | Canvas-textured in-world menu and controller/hand-selection ray interaction |
+| `tear.js` | Shared world-space aperture shaders and reversible gesture/animation state |
+| `hand-input.js` | Joint-pose sampling, pinch hysteresis, controller grip positions, procedural hand visuals |
 | `serve.mjs` | Optional dependency-free localhost server; not needed by Pages |
 | `tests/` | Optional browser regression harness; not part of the app startup |
 
@@ -156,7 +180,7 @@ node tests/smoke.mjs
 
 On Windows the harness defaults to Chrome in Program Files; set `CHROME_PATH` for another executable. It uses hidden headless Chrome and built-in Node APIs, starts an ephemeral loopback server, loads the actual CDN dependencies, and saves screenshots in ignored `.test-output/`. No package installation is needed.
 
-Checks cover concave plane triangulation, mesh/plane precedence, pose-only updates, triangle collision, geometry replacement, tracking loss/recovery, collider cleanup, OBJ transforms, render modes, ball limits, desktop controls, XR menu ray selection, and mobile overflow. Synthetic XR frame data exercises the mapping lifecycle. **These checks do not validate a real immersive session, Quest permissions, scan quality, tracking alignment, or headset performance.**
+Checks cover concave plane triangulation, mesh/plane precedence, pose-only updates, triangle collision, geometry replacement, tracking loss/recovery, collider cleanup, OBJ transforms, render modes, ball limits, desktop controls, XR menu ray selection, and mobile overflow. Synthetic XR frame data exercises the mapping lifecycle. Additional tests cover reversible tear gestures, small-tear cancellation, hand-tracking loss, pinch hysteresis, menu input consumption, and GPU framebuffer alpha for reality, mesh, and both partial-transition directions. The latest browser run passed 37 checks; preview screenshots include `tear.png` and `mesh.png`. **These checks do not validate a real immersive session, Quest permissions, scan quality, tracking alignment, or headset performance.**
 
 On the device, verify:
 
@@ -164,6 +188,9 @@ On the device, verify:
 - A ball hits the same surfaces you see, including the tabletop and walls.
 - Light overlay, virtual room, strength, dimming, and pin/unpin work from the floating menu.
 - Left grip recovers the menu when you turn away.
+- Two-hand pinches and two-controller trigger holds can both enter and leave the mesh world.
+- Small tears cancel; wider tears complete on release; a lost hand pose cancels an active tear.
+- The opening aligns between the eyes, and virtual hands appear on the mesh side of it.
 - The app behaves clearly when spatial permission is denied or there is no room scan.
 - Pause/resume, room capture, tracking loss, exit, and a second AR session work.
 - After exit, the downloaded OBJ opens at meter scale in Blender or another mesh tool.
@@ -183,4 +210,5 @@ Reviewed September 9, 2026. Runtime support should still be checked on your part
 - [Meta: native Passthrough Camera API](https://developers.meta.com/horizon/documentation/unity/unity-pca-overview/) — native camera capture route.
 - [QuestRoomScan source](https://github.com/arghyasur1991/QuestRoomScan) — an independent Unity implementation of TSDF fusion, Surface Nets meshing, and passthrough texturing, for studying the more ambitious reconstruction pipeline; not a dependency or verified implementation of the X post.
 - [Rapier JavaScript colliders](https://rapier.rs/docs/user_guides/javascript/colliders/) — triangle meshes and dynamic collider shapes.
+- [WebXR Hand Input specification](https://immersive-web.github.io/webxr-hand-input/) — optional hand tracking and joint poses.
 - [Three.js documentation](https://threejs.org/docs/) — WebXRManager, rendering, and materials.

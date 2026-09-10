@@ -302,7 +302,10 @@ renderer.setAnimationLoop((time, frame) => {
       visibility: session?.visibilityState ?? 'desktop', savedSurfaces: savedRoom.length,
       tear: { enabled: tear.enabled, inMesh: tear.inMesh, progress: tear.progress },
       hands: session ? Array.from(session.inputSources).filter(source => source.hand).length : 0 }, null, 2);
-    if (session) menu.draw({ ...stats, message, tear: state.mode === 'tear' });
+    if (session) {
+      const gestureMessage = tear.dragging ? `Tear ${Math.round(tear.progress * 100)}%. ${tear.progress >= 0.5 ? 'Release to complete the transition.' : 'Pull farther apart, or release to close.'}` : message;
+      menu.draw({ ...stats, message: gestureMessage, tear: state.mode === 'tear' });
+    }
   }
   renderer.render(scene, camera);
 });

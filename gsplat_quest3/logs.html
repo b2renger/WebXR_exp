@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Splat Placer — session logs</title><link rel="icon" href="data:,">
+<style>
+body { margin: 25px; background: #101918; color: #e3f5e9; font: 14px/1.5 system-ui; }
+main { max-width: 1200px; margin: auto; } a { color: #c7f5a0; } h1 { font-weight: 500; }
+.tools { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin: 20px 0; }
+select,input,button { background: #21352c; color: inherit; border: 1px solid #557563; border-radius: 6px; padding: 8px; }
+select { max-width: 100%; } pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.5 Consolas, monospace; }
+.error { color: #ff9c9c; } .warn { color: #ffcf81; } #status { color: #a8c5ad; }
+</style></head><body><main>
+<a href="./">← Room laboratory</a><h1>Session recordings</h1>
+<p>Live view of the local server’s saved logs. Downloads contain the full session; the preview shows its latest events.</p>
+<div class="tools"><select id="sessions" aria-label="Recorded session"></select><button id="refresh">Refresh</button>
+<a id="download">Download full session</a><input id="filter" placeholder="Filter event or text" aria-label="Filter logs">
+<label><input type="checkbox" id="errors"> Warnings / errors only</label></div>
+<p id="status" role="status">Connecting…</p><div id="events"></div>
+</main><script type="module">
+const $ = id => document.getElementById(id);
+let events = [], busy = false;
+function render() {
+  const filter = $('filter').value.toLowerCase();
+  $('events').replaceChildren(...events.filter(event => (!$('errors').checked || ['warn', 'error'].includes(event.level)) && JSON.stringify(event).toLowerCase().includes(filter)).map(event => {
+    const line = document.createElement('pre'); line.className = event.level;
+    line.textContent = `${event.seq}  ${event.time}  +${event.elapsedMs.toFixed(0)}ms  [${event.level}] ${event.event}\n${JSON.stringify(event.data, null, 2)}`;
+    return line;
+  }));
+}
+async function update() {
+  if (busy) return; busy = true;
+  try {
+    const response = await fetch('./__logs/sessions.json', { cache: 'no-store' });
+    if (!response.ok) throw new Error('Run node serve.mjs to use this viewer. On GitHub Pages, download logs from the app’s Recording panel.');
+    const sessions = await response.json();
+    const selected = $('sessions').value;
+    $('sessions').replaceChildren(...sessions.map(session => { const option = document.createElement('option'); option.value = session.sid; option.textContent = `${session.modified} · ${session.sid} · ${(session.bytes / 1024).toFixed(1)} KiB`; return option; }));
+    if (sessions.some(session => session.sid === selected)) $('sessions').value = selected;
+    const sid = $('sessions').value;
+    if (!sid) { $('status').textContent = 'No recordings yet. Open the room laboratory on your desktop or Quest.'; $('download').removeAttribute('href'); events = []; render(); return; }
+    $('download').href = './__logs/download/' + encodeURIComponent(sid) + '.ndjson';
+    const tail = await fetch('./__logs/tail?session=' + encodeURIComponent(sid), { cache: 'no-store' });
+    if (!tail.ok) throw new Error('Could not read the session log');
+    const result = await tail.json(); events = result.events;
+    $('status').textContent = `${result.truncated ? 'Latest' : 'All'} ${events.length} events in preview · refreshing every 2 seconds · full log is saved on disk`;
+    render();
+  } catch (error) { $('status').textContent = error.message; }
+  finally { busy = false; }
+}
+$('refresh').onclick = update; $('sessions').onchange = update; $('filter').oninput = render; $('errors').onchange = render;
+await update(); setInterval(update, 2000);
+</script></body></html>

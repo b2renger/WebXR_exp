@@ -1,152 +1,169 @@
-// Dev server for the Quest 3 splat placer, zero dependencies.
-//
-//   node serve.mjs            → http://localhost:8443  (+ https on 8444 if certs exist)
-//
-// Getting a SECURE CONTEXT on the Quest (WebXR requires one):
-//   Option A (recommended, no certificates):
-//       adb reverse tcp:8443 tcp:8443
-//     then open http://localhost:8443 in the Quest browser — localhost is a
-//     secure context, and adb tunnels it to this machine.
-//   Option B (LAN + HTTPS): create key.pem/cert.pem next to this file:
-//       openssl req -x509 -newkey rsa:2048 -nodes -keyout key.pem -out cert.pem -days 365 -subj "/CN=dev"
-//     then open https://<pc-ip>:8444 on the Quest and accept the warning.
-//
-// Remote logging: the page POSTs batches of log lines to /log. They are
-// appended to quest-logs.ndjson here and echoed to this console.
-//   GET /logs        → last 300 log lines as plain text
-//   GET /logs/clear  → truncate the log file
-
+// Dependency-free preview + durable local logs. GitHub Pages needs only static files.
+import { createReadStream } from 'node:fs';
 import http from 'node:http';
 import https from 'node:https';
-import fs from 'node:fs';
+import { readFile, readdir, stat, realpath, mkdir, open } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const ROOT = path.dirname(fileURLToPath(import.meta.url));
-const LOG_FILE = path.join(ROOT, 'quest-logs.ndjson');
-const PORT = Number(process.env.PORT || 8443);
-
-// rotate an oversized log at startup so it never grows without bound
-try {
-  if (fs.existsSync(LOG_FILE) && fs.statSync(LOG_FILE).size > 5 * 1024 * 1024) {
-    fs.renameSync(LOG_FILE, LOG_FILE + '.old');
-    console.log('rotated oversized log to quest-logs.ndjson.old');
+const root = path.dirname(fileURLToPath(import.meta.url));
+const sessionPattern = /^[a-zA-Z0-9-]{8,90}$/;
+const protocol = 'spatial-log-v1';
+export function createServer({ logDirectory = path.join(root, 'logs'), quiet = false, tls = null } = {}) {
+  const seenSessions = new Map();
+  let writes = Promise.resolve();
+  const json = (res, code, value) => { res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(value)); };
+  const filename = sid => path.join(logDirectory, `session-${sid}.ndjson`);
+  async function save(events) {
+    await mkdir(logDirectory, { recursive: true });
+    const groups = new Map();
+    for (const event of events) { if (!groups.has(event.sid)) groups.set(event.sid, []); groups.get(event.sid).push(event); }
+    for (const [sid, entries] of groups) {
+      let seen = seenSessions.get(sid);
+      if (!seen) {
+        seen = new Set();
+        try {
+          const old = await readFile(filename(sid), 'utf8');
+          for (const line of old.split('\n')) { if (line) { try { seen.add(JSON.parse(line).seq); } catch { /* Preserve an interrupted trailing write for inspection. */ } } }
+          if (old && !old.endsWith('\n')) {
+            const handle = await open(filename(sid), 'a');
+            try { await handle.writeFile('\n'); await handle.sync(); } finally { await handle.close(); }
+          }
+        } catch (error) { if (error.code !== 'ENOENT') throw error; }
+        seenSessions.set(sid, seen);
+      }
+      const unique = [], batchSeen = new Set();
+      for (const event of entries) if (!seen.has(event.seq) && !batchSeen.has(event.seq)) {
+        batchSeen.add(event.seq); unique.push({ ...event, serverReceivedAt: new Date().toISOString() });
+      }
+      if (!unique.length) continue;
+      const handle = await open(filename(sid), 'a');
+      try { await handle.writeFile(unique.map(event => JSON.stringify(event)).join('\n') + '\n'); await handle.sync(); }
+      finally { await handle.close(); }
+      for (const event of unique) {
+        seen.add(event.seq);
+        if (!quiet && !['xr.pose_sample', 'hand.pose_sample', 'app.heartbeat'].includes(event.event)) console.log(`[${sid.slice(0, 8)} #${event.seq}] ${event.level} ${event.event} ${JSON.stringify(event.data ?? null).slice(0, 220)}`);
+      }
+    }
   }
-} catch (e) { console.warn('log rotation failed:', e.message); }
-
-// one persistent append stream — sync appends would stall .sog/.rad streaming
-const logStream = fs.createWriteStream(LOG_FILE, { flags: 'a' });
-logStream.on('error', (e) => console.warn('log write failed:', e.message));
-
-const TYPES = {
-  '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.mjs': 'text/javascript',
-  '.json': 'application/json', '.sog': 'application/octet-stream', '.rad': 'application/octet-stream',
-  '.spz': 'application/octet-stream', '.ply': 'application/octet-stream', '.png': 'image/png',
-};
-
-const stamp = () => new Date().toISOString().slice(11, 19);
-const fmtLine = (e) => e.raw !== undefined
-  ? `${e.recv || ''} [raw] ${e.raw}`
-  : `${e.recv || ''} ${e.t}s [${e.level}] ${e.msg}`;
-
-function handleLogPost(req, res) {
-  let body = '';
-  req.on('error', () => {});   // aborted beacons/keepalive posts must not crash the server
-  req.on('data', (c) => {
-    body += c;
-    if (body.length > 1e6) { res.writeHead(413).end(); req.destroy(); }
-  });
-  req.on('end', () => {
-    const out = [];
-    for (const line of body.split('\n').filter(Boolean)) {
-      try {
-        const e = JSON.parse(line);
-        out.push(JSON.stringify({ recv: new Date().toISOString(), ...e }));
-        const color = e.level === 'error' ? '\x1b[31m' : e.level === 'warn' ? '\x1b[33m' : e.level === 'xr' ? '\x1b[36m' : '';
-        console.log(`${color}[quest ${stamp()}] ${e.t}s [${e.level}] ${e.msg}\x1b[0m`);
-      } catch { out.push(JSON.stringify({ recv: new Date().toISOString(), raw: line })); }
-    }
-    if (out.length) logStream.write(out.join('\n') + '\n');
-    res.writeHead(204).end();
-  });
-}
-
-// read only the tail of the log file (it can grow large during a long session)
-function readLogTail() {
-  try {
-    const st = fs.statSync(LOG_FILE);
-    if (!st.size) return '';
-    const want = Math.min(st.size, 64 * 1024);
-    const fd = fs.openSync(LOG_FILE, 'r');
-    const buf = Buffer.alloc(want);
-    fs.readSync(fd, buf, 0, want, st.size - want);
-    fs.closeSync(fd);
-    return buf.toString('utf8').trim().split('\n').slice(-300).map((l) => {
-      try { return fmtLine(JSON.parse(l)); } catch { return l; }
-    }).join('\n');
-  } catch { return ''; }
-}
-
-function serveStatic(req, res, urlPath) {
-  const file = path.join(ROOT, path.normalize(urlPath).replace(/^([/\\])+/, ''));
-  if (!file.startsWith(ROOT)) { res.writeHead(403).end(); return; }
-  fs.stat(file, (err, st) => {
-    if (err || !st.isFile()) { res.writeHead(404).end('not found'); return; }
-    const type = TYPES[path.extname(file).toLowerCase()] || 'application/octet-stream';
-    // Spark's paged .rad streaming fetches byte ranges — support single ranges.
-    // 'bytes=-' (both sides empty) is invalid per RFC 9110: ignore it, serve 200.
-    const m = st.size > 0 && req.headers.range && /^bytes=(\d*)-(\d*)$/.exec(req.headers.range);
-    const valid = m && (m[1] !== '' || (m[2] !== '' && Number(m[2]) > 0));
-    if (valid) {
-      const [, s, e] = m;
-      const start = s === '' ? Math.max(0, st.size - Number(e)) : Number(s);
-      const end = s !== '' && e !== '' ? Math.min(Number(e), st.size - 1) : st.size - 1;
-      if (start > end || start >= st.size) { res.writeHead(416, { 'Content-Range': `bytes */${st.size}` }).end(); return; }
-      res.writeHead(206, {
-        'Content-Type': type, 'Content-Length': end - start + 1, 'Accept-Ranges': 'bytes',
-        'Content-Range': `bytes ${start}-${end}/${st.size}`, 'Cache-Control': 'no-cache',
-      });
-      fs.createReadStream(file, { start, end }).pipe(res);
-    } else {
-      res.writeHead(200, { 'Content-Type': type, 'Content-Length': st.size, 'Accept-Ranges': 'bytes', 'Cache-Control': 'no-cache' });
-      fs.createReadStream(file).pipe(res);
-    }
-  });
-}
-
-function handler(req, res) {
-  try {
-    req.on('error', () => {});
-    res.on('error', () => {});
-    let urlPath;
-    try { urlPath = decodeURIComponent(req.url.split('?')[0]); }
-    catch { res.writeHead(400).end('bad url'); return; }
-    if (req.method === 'POST' && urlPath === '/log') return handleLogPost(req, res);
-    if (urlPath === '/logs') {
-      res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' }).end(readLogTail() || '(no logs yet)');
-      return;
-    }
-    if (urlPath === '/logs/clear') {
-      try { fs.truncateSync(LOG_FILE, 0); res.writeHead(200).end('cleared'); }
-      catch (e) { res.writeHead(500).end('clear failed: ' + e.message); }
-      return;
-    }
-    serveStatic(req, res, urlPath === '/' ? '/index.html' : urlPath);
-  } catch (e) {
-    console.warn('handler error:', e.message);
-    try { res.writeHead(500).end(); } catch (e2) {}
+  async function body(req) {
+    let length = 0; const chunks = [];
+    for await (const chunk of req) { length += chunk.length; if (length > 1024 * 1024) { const error = new Error('Log batch exceeds 1 MiB'); error.status = 413; throw error; } chunks.push(chunk); }
+    try { return JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { const error = new Error('Invalid JSON'); error.status = 400; throw error; }
   }
+  async function handle(req, res) {
+    try {
+      const url = new URL(req.url, 'http://localhost');
+      const pathname = decodeURIComponent(url.pathname);
+      if (pathname.startsWith('/__logs/')) {
+        // No CORS: an unrelated page must not inject log entries into this server.
+        if (req.headers['sec-fetch-site'] === 'cross-site' || (req.headers.origin && new URL(req.headers.origin).host !== req.headers.host)) {
+          json(res, 403, { error: 'Same-origin requests only' }); return;
+        }
+        if (pathname === '/__logs/config.json' && req.method === 'GET') { json(res, 200, { protocol }); return; }
+        if (pathname === '/__logs/events' && req.method === 'POST') {
+          if (!(req.headers['content-type'] || '').startsWith('application/json')) { json(res, 415, { error: 'Use application/json' }); return; }
+          const { events } = await body(req);
+          if (!Array.isArray(events) || !events.length || events.length > 200 || events.some(event =>
+            !event || event.schema !== 1 || !sessionPattern.test(event.sid) || !Number.isSafeInteger(event.seq) || event.seq < 1 ||
+            typeof event.time !== 'string' || !Number.isFinite(event.elapsedMs) || typeof event.event !== 'string' || event.event.length > 120 ||
+            !['info', 'warn', 'error', 'debug'].includes(event.level) || JSON.stringify(event).length > 24000)) {
+            json(res, 400, { error: 'Invalid log event schema or batch size' }); return;
+          }
+          const operation = writes.then(() => save(events)); writes = operation.catch(() => {});
+          await operation;
+          json(res, 200, { protocol, acknowledged: events.length }); return;
+        }
+        if (pathname === '/__logs/sessions.json' && req.method === 'GET') {
+          let names = []; try { names = await readdir(logDirectory); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+          const sessions = [];
+          for (const name of names) {
+            const sid = name.replace(/^session-/, '').replace(/\.ndjson$/, '');
+            if (name !== `session-${sid}.ndjson` || !sessionPattern.test(sid)) continue;
+            const info = await stat(filename(sid));
+            sessions.push({ sid, bytes: info.size, modified: info.mtime.toISOString() });
+          }
+          json(res, 200, sessions.sort((a, b) => b.modified.localeCompare(a.modified))); return;
+        }
+        if ((pathname === '/__logs/tail' || pathname.startsWith('/__logs/download/')) && req.method === 'GET') {
+          const sid = pathname === '/__logs/tail' ? url.searchParams.get('session') : pathname.slice('/__logs/download/'.length).replace(/\.ndjson$/, '');
+          if (!sid || !sessionPattern.test(sid)) { json(res, 400, { error: 'Invalid session ID' }); return; }
+          await writes;
+          if (pathname === '/__logs/tail') {
+            const handle = await open(filename(sid), 'r');
+            try {
+              const info = await handle.stat(); const start = Math.max(0, info.size - 256 * 1024);
+              const buffer = Buffer.alloc(info.size - start); await handle.read(buffer, 0, buffer.length, start);
+              const lines = buffer.toString('utf8').split('\n'); if (start) lines.shift();
+              const events = lines.filter(Boolean).flatMap(line => { try { return [JSON.parse(line)]; } catch { return []; } });
+              json(res, 200, { events: events.slice(-300), truncated: start > 0 || events.length > 300 });
+            } finally { await handle.close(); }
+          } else {
+            const bytes = await readFile(filename(sid));
+            res.writeHead(200, { 'Content-Type': 'application/x-ndjson', 'Content-Disposition': `attachment; filename="session-${sid}.ndjson"`, 'Cache-Control': 'no-store' }); res.end(bytes);
+          }
+          return;
+        }
+        json(res, 404, { error: 'Unknown logging endpoint' }); return;
+      }
+      if (req.method !== 'GET' && req.method !== 'HEAD') { res.writeHead(405).end(); return; }
+      const parts = pathname.split(/[\\/]/);
+      if (parts.some(part => part.startsWith('.') || part === 'logs' || part === 'certs' || /\.(pem|key|pfx|p12|ndjson|old)$/i.test(part))) { res.writeHead(403).end(); return; }
+      const target = await realpath(path.resolve(root, '.' + (pathname.endsWith('/') ? pathname + 'index.html' : pathname)));
+      const resolvedRoot = await realpath(root);
+      if (!target.startsWith(resolvedRoot + path.sep)) { res.writeHead(403).end(); return; }
+      const types = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css', '.md': 'text/plain', '.png': 'image/png' };
+      const info = await stat(target);
+      if (!info.isFile()) { res.writeHead(404).end(); return; }
+      const type = types[path.extname(target)] || 'application/octet-stream';
+      const headers = { 'Content-Type': type, 'Cache-Control': 'no-store', 'Accept-Ranges': 'bytes' };
+      let start = 0, end = info.size - 1, code = 200;
+      const match = req.method === 'GET' && /^bytes=(\d*)-(\d*)$/.exec(req.headers.range || '');
+      if (match && (match[1] || Number(match[2]) > 0)) {
+        start = match[1] ? Number(match[1]) : Math.max(0, info.size - Number(match[2]));
+        end = match[1] && match[2] ? Math.min(Number(match[2]), info.size - 1) : info.size - 1;
+        if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start > end || start >= info.size) {
+          res.writeHead(416, { 'Content-Range': 'bytes */' + info.size }).end(); return;
+        }
+        code = 206; headers['Content-Range'] = 'bytes ' + start + '-' + end + '/' + info.size;
+      }
+      headers['Content-Length'] = Math.max(0, end - start + 1);
+      res.writeHead(code, headers);
+      if (req.method === 'HEAD' || !info.size) { res.end(); return; }
+      const stream = createReadStream(target, { start, end });
+      stream.on('error', () => res.destroy());
+      res.on('close', () => stream.destroy());
+      stream.pipe(res);
+    } catch (error) {
+      const code = error.status || (error.code === 'ENOENT' ? 404 : 500);
+      if (code === 500 && !quiet) console.error('[server]', error);
+      if (!res.headersSent) json(res, code, { error: code === 500 ? 'Server error; see terminal' : error.message }); else res.end();
+    }
+  }
+  const server = tls ? https.createServer(tls, handle) : http.createServer(handle);
+  server.requestTimeout = 15000;
+  server.logsSettled = () => writes;
+  return server;
 }
-
-http.createServer(handler).listen(PORT, () => {
-  console.log(`http  : http://localhost:${PORT}   (Quest: adb reverse tcp:${PORT} tcp:${PORT} → http://localhost:${PORT})`);
-  console.log(`logs  : ${LOG_FILE}  |  tail: GET /logs`);
-});
-
-const key = path.join(ROOT, 'key.pem'), cert = path.join(ROOT, 'cert.pem');
-if (fs.existsSync(key) && fs.existsSync(cert)) {
-  https.createServer({ key: fs.readFileSync(key), cert: fs.readFileSync(cert) }, handler)
-    .listen(PORT + 1, () => console.log(`https : https://<this-pc-ip>:${PORT + 1}  (accept the cert warning on the Quest)`));
-} else {
-  console.log('https : off (create key.pem/cert.pem to enable — see header comment)');
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const port = Number(process.env.PORT || 8443), host = process.env.HOST || '127.0.0.1';
+  const logDirectory = path.resolve(process.env.LOG_DIR || path.join(root, 'logs'));
+  const tls = process.env.HTTPS_KEY && process.env.HTTPS_CERT ? {
+    key: await readFile(process.env.HTTPS_KEY), cert: await readFile(process.env.HTTPS_CERT),
+  } : null;
+  const server = createServer({ logDirectory, tls });
+  server.on('error', error => { console.error(error.code === 'EADDRINUSE' ? `Port ${port} is already in use. Stop the previous server or choose another PORT.` : error); process.exitCode = 1; });
+  server.listen(port, host, () => {
+    const scheme = tls ? 'https' : 'http';
+    console.log(`Splat Placer: ${scheme}://localhost:${port}`);
+    console.log(`Log viewer:      ${scheme}://localhost:${port}/logs.html`);
+    console.log(`Logs on disk:    ${logDirectory}`);
+    console.log(`Quest USB:       adb reverse tcp:${port} tcp:${port}`);
+    console.log('Ctrl+C stops the server. Files are append-only; restart preserves existing logs.');
+  });
+  let stopping = false;
+  process.on('SIGINT', async () => {
+    if (stopping) return; stopping = true;
+    server.close(); await server.logsSettled(); server.closeAllConnections();
+  });
 }

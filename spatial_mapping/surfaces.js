@@ -112,6 +112,7 @@ export class Surfaces {
     collider.setEnabled(false);
     group.visible = false;
     this.records.set(key, record);
+    globalThis.SpatialLog?.record('surface.added', { label, vertices: data.vertices.length / 3, triangles: data.indices.length / 3, changed });
     this.applyStyle(record);
     return record;
   }
@@ -129,6 +130,7 @@ export class Surfaces {
     for (const record of this.records.values()) this.applyStyle(record);
   }
   pose(record, matrix) {
+    if (record.localized !== Boolean(matrix)) globalThis.SpatialLog?.record('surface.tracking', { label: record.label, localized: Boolean(matrix) });
     record.group.visible = Boolean(matrix);
     record.localized = Boolean(matrix);
     record.collider.setEnabled(Boolean(matrix));
@@ -146,6 +148,7 @@ export class Surfaces {
   }
   remove(key) {
     const record = this.records.get(key);
+    globalThis.SpatialLog?.record('surface.removed', { label: record.label, triangles: record.geometry.index.count / 3 });
     this.scene.remove(record.group);
     record.geometry.dispose();
     this.physics.removeSurface(record.collider);

@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#101918">
   <title>Spatial Mapping — room laboratory</title>
+  <script src="./logger.js"></script>
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="./style.css">
   <script type="importmap">
@@ -63,9 +64,22 @@
       <p><b>Desktop:</b> drag to orbit, scroll to zoom. The room is synthetic; it previews the same rendering and physics used in AR.</p>
       <p><b>Reality ↔ Mesh:</b> pinch both hands or hold both controller triggers with your hands close together, pull apart, then release. Repeat to return. The floating menu also has Tear / Return buttons.</p>
       <p>Light overlay colors and dims scanned surfaces. Virtual room replaces those surfaces with lit geometry. Neither removes the lighting already present in the camera image.</p>
-      <p><a href="./README.md">Implementation & next steps ↗</a></p>
+      <p><a href="./LOCAL_DEBUGGING.md">Local setup, Quest debugging & logs ↗</a><br><a href="./README.md">Implementation & next steps ↗</a></p>
     </details>
     <details><summary>Diagnostics</summary><pre id="diagnostics">Waiting for startup…</pre></details>
+    <details id="logs-panel"><summary>Recording & logs</summary>
+      <pre id="logs-status" role="status">Starting session recorder…</pre>
+      <label class="check"><input type="checkbox" id="logs-poses" checked> Record headset / input poses at 5 Hz</label>
+      <div class="actions">
+        <button id="logs-download">Download this session</button><button id="logs-download-all">Download all sessions</button>
+        <button id="logs-flush">Sync to local server</button><a href="./logs.html" target="_blank" rel="noopener">PC log viewer ↗</a>
+      </div>
+      <label for="logs-note">ADD A DEBUG MARKER</label>
+      <input id="logs-note" type="text" maxlength="1000" placeholder="What happened?" style="width:100%;margin:8px 0;padding:8px;box-sizing:border-box">
+      <button id="logs-mark">Record marker</button>
+      <p>Events and errors are saved in this browser. With the local server, logs also stream to disk. On Pages, use the download buttons after exiting AR.</p>
+      <pre id="logs-tail" style="max-height:250px;overflow:auto"></pre>
+    </details>
   </main>
   <aside id="preview-note"><span class="dot"></span> DESKTOP SAMPLE ROOM <small>Drag to explore · Enter AR to use your real room</small></aside>
   <script>

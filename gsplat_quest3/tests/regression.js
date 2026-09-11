@@ -1,0 +1,110 @@
+import * as THREE from 'three';
+export async function run(app) {
+  const results = [];
+  const check = (ok, name) => { if (!ok) throw new Error(name); results.push(name); };
+  const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+  const storeKey = 'splat-placer-v2:' + location.pathname;
+  const item = app.placeItem(app.library.find(a => a.name === 'splat.sog'), new THREE.Vector3(), 0);
+  await item.ready;
+  for (let i=0; i<60 && !item._fitted; i++) await pause(250);
+  check(item.loaded && item._fitted && item.splat.numSplats > 0, 'Real SOG loads and fits with Spark runtime LOD');
+  check(Math.abs(item.rig.scale.x - item.baseScale) < 0.001, 'Delayed loading auto-fits untouched selected item');
+  item.rig.position.x = 1.23; app.saveNow();
+  const before = localStorage.getItem(storeKey), beforeItem = app.items[0];
+  for (const text of ['{bad', JSON.stringify({version:2, items:[{id:'bad',src:'javascript:alert(1)',pos:[0,0,0],yaw:0,scale:1,name:'bad'}]}), JSON.stringify({version:2, items:[{...item.toJSON(),scale:-1}]})]) {
+    let rejected=false; try { app.importLayout(text); } catch { rejected=true; }
+    check(rejected && localStorage.getItem(storeKey) === before && app.items[0] === beforeItem, 'Invalid import preserves both current and stored layout');
+  }
+  item.rig.position.x=4.56;
+  check(app.layoutSnapshot().items[0].pos[0]===4.56 && JSON.parse(before).items[0].pos[0]===1.23, 'Export snapshot reads current transforms before debounce');
+  app.validateLayout(app.layoutSnapshot());
+  const xr=app.renderer.xr;
+  app.renderer.setAnimationLoop(null);
+  const original={getSession:xr.getSession,getReferenceSpace:xr.getReferenceSpace,isPresenting:xr.isPresenting};
+  let session={inputSources:[],visibilityState:'visible',deletePersistentAnchor:async()=>{}};
+  xr.getSession=()=>session; xr.getReferenceSpace=()=>({}); xr.isPresenting=true;
+  app.configureTest({xrTracking:true});
+  window.XRRigidTransform ||= class { constructor(position,orientation) { this.position=position;this.orientation=orientation; } };
+  const [left,right]=app.controllers;
+  left.visible=right.visible=true;
+  document.getElementById('persist-anchor').checked=false;
+  try {
+    app.configureTest({roomAnchored:false,placing:false,lastHitPose:{position:new THREE.Vector3(1,0,-2),yaw:0}});
+    let active=false,calls=0;
+    const anchor={delete(){this.deleted=true;},anchorSpace:{}};
+    const frame={createAnchor(){if(!active)throw new Error('Inactive XRFrame');calls++;return Promise.resolve(anchor);}};
+    app.onTrigger(right);
+    check(calls===0 && app.state.pendingPlacement, 'Controller select queues placement without using an expired frame');
+    active=true; app.processPlacement(frame); active=false; await pause(0);
+    check(calls===1 && app.state.xrAnchor===anchor, 'Anchor creation runs synchronously inside active frame processing');
+    let finish; const late={delete(){this.deleted=true;}};
+    const pending=app.makeRoomAnchor(new THREE.Vector3(),0,{createAnchor:()=>new Promise(r=>finish=r)});
+    session=null; app.invalidateAnchors(); finish(late); await pending;
+    check(late.deleted && app.state.xrAnchor===null, 'Anchor completion after session exit is deleted and ignored');
+    let restore; session={restorePersistentAnchor:()=>new Promise(r=>restore=r)};
+    app.configureTest({persistedAnchorUUID:'old-room'}); app.beginRestore(session);
+    app.configureTest({restoreDeadline:performance.now()-1});
+    const old={delete(){this.deleted=true;}}; restore(old); await pause(0);
+    check(old.deleted && app.state.xrAnchor===null, 'Restore promise arriving after its deadline cannot attach');
+    app.beginRestore(session);
+    const replacement={delete(){},anchorSpace:{}};
+    await app.makeRoomAnchor(new THREE.Vector3(),0,{createAnchor:async()=>replacement});
+    const stale={delete(){this.deleted=true;}};restore(stale);await pause(0);
+    check(stale.deleted && app.state.xrAnchor===replacement, 'A superseded restore cannot overwrite a newly placed anchor');
+    app.configureTest({persistedAnchorUUID:'obsolete-room'});
+    await app.makeRoomAnchor(new THREE.Vector3(),0,{});
+    check(app.state.persistedAnchorUUID===null && JSON.parse(localStorage.getItem(storeKey)).anchorUUID===null, 'Fixed-pose re-anchor detaches the previous persistent UUID');
+    const positionBefore=item.rig.position.clone();
+    session={visibilityState:'visible',inputSources:[{handedness:'left',gamepad:{axes:[0,0,1,1],buttons:[]}}]};
+    app.configureTest({xrTracking:false,roomAnchored:true});app.selectItem(item);app.anchorNode.visible=true;
+    app.handleGamepads(1);
+    check(item.rig.position.equals(positionBefore), 'Untracked frame cannot move a selected item via held thumbsticks');
+    app.configureTest({xrTracking:true});
+    const stick={handedness:'left',gamepad:{axes:[0,0,0,-1],buttons:[]}};
+    session.inputSources=[stick];app.configureTest({trackedSources:new Set([stick]),roomAnchored:true});
+    for (const [headYaw,roomYaw] of [[0,0],[Math.PI/2,0],[0,Math.PI/2],[Math.PI/2,Math.PI/2]]) {
+      app.camera.quaternion.setFromAxisAngle(new THREE.Vector3(0,1,0),headYaw);
+      app.anchorNode.quaternion.setFromAxisAngle(new THREE.Vector3(0,1,0),roomYaw);
+      item.rig.position.set(0,0,0);app.handleGamepads(1);
+      const actual=item.rig.position.clone().applyQuaternion(app.anchorNode.quaternion);
+      const expected=new THREE.Vector3(0,0,-0.6).applyAxisAngle(new THREE.Vector3(0,1,0),headYaw);
+      check(actual.distanceTo(expected)<1e-6, 'Forward thumbstick follows head direction with head/anchor yaw '+headYaw+'/'+roomYaw);
+    }
+    app.camera.quaternion.identity();app.anchorNode.quaternion.identity();
+    let resolveOld;
+    const oldSession={requestReferenceSpace:async()=>({}),requestHitTestSource:()=>new Promise(r=>resolveOld=r)};
+    session=oldSession;const oldSetup=app.setupHitTest(oldSession);await pause(0);
+    const newSource={cancel(){this.cancelled=true;}};
+    session={requestReferenceSpace:async()=>({}),requestHitTestSource:async()=>newSource};
+    await app.setupHitTest(session);
+    const oldSource={cancel(){this.cancelled=true;}};resolveOld(oldSource);await oldSetup;
+    check(oldSource.cancelled && !newSource.cancelled && app.state.hitTestSource===newSource, 'Late hit-test source from old session cannot replace the active source');
+    newSource.cancel();app.configureTest({hitTestSource:null});
+    app.configureTest({roomAnchored:true});app.anchorNode.visible=true;app.selectItem(item);
+    left.position.set(-0.2,0,0);right.position.set(0.2,0,0);
+    app.onSqueeze(left,true);app.onSqueeze(right,true);
+    check(app.pinch.active,'Two grips begin a pinch');
+    item.rig.scale.setScalar(2.34);item.rig.rotation.y=0.67;
+    app.onSqueeze(left,false);await pause(350);
+    const saved=JSON.parse(localStorage.getItem(storeKey)).items[0];
+    check(saved.scale===2.34 && saved.yaw===0.67 && !app.pinch.active,'Pinch release persists the final transform');
+    app.grab.active=true;app.grab.ctrl=right;app.grab.item=item;right.userData.grabbing=true;app.keys.add('w');
+    right.dispatchEvent({type:'disconnected'});
+    check(!app.grab.active && !app.pinch.active && !right.userData.grabbing && !app.keys.size,'Controller disconnect clears manipulation and held input');
+    app.grab.active=true;app.grab.item=item;app.pinch.active=true;app.pinch.item=item;
+    item.remove();item.remove();
+    check(!app.items.includes(item) && !app.grab.active && !app.pinch.active,'Removing a held item cancels manipulation and is idempotent');
+  } finally {
+    app.cancelInput('test cleanup');app.invalidateAnchors();
+    Object.assign(xr,original);app.configureTest({roomAnchored:false,placing:false,persistedAnchorUUID:null,hitTestSource:null,trackedSources:new Set()});
+    app.anchorNode.position.set(0,0,0);app.anchorNode.quaternion.identity();app.saveNow();
+    document.getElementById('persist-anchor').checked=true;
+    app.renderer.setAnimationLoop(app.animate);
+  }
+  const failedLayout = {version:2,anchorUUID:null,items:[{id:'offline-item',name:'SPATIAL_LOG_TEST_ASSET.sog',src:'./SPATIAL_LOG_TEST_ASSET.sog',pos:[2,3,4],yaw:0.5,scale:2}]};
+  app.importLayout(JSON.stringify(failedLayout));
+  const failedItem=app.items[0];await failedItem.ready;app.saveNow();
+  check(failedItem.failed && app.items.includes(failedItem) && JSON.parse(localStorage.getItem(storeKey)).items[0].id==='offline-item', 'Failed asset initialization preserves the restored composition');
+  failedItem.remove();app.saveNow();
+  return results;
+}

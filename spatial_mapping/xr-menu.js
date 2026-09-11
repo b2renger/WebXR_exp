@@ -14,6 +14,9 @@ export class XRMenu {
     this.mesh.renderOrder = 100;
     this.mesh.visible = false;
     this.lastText = '';
+    this.pointers = new Map();
+    this.pressed = new Map();
+    this.state = null;
   }
   place(camera) {
     const position = camera.getWorldPosition(new THREE.Vector3());
@@ -25,8 +28,11 @@ export class XRMenu {
     this.mesh.updateMatrixWorld(true);
   }
   draw(state) {
+    this.state = state;
     const labels = this.actions.map(action => action.label(state));
-    const signature = JSON.stringify([state, labels]);
+    const hovered = new Set(this.pointers.values());
+    const pressed = new Set(this.pressed.values());
+    const signature = JSON.stringify([state, labels, [...hovered], [...pressed]]);
     if (signature === this.lastText) return;
     this.lastText = signature;
     const c = this.context;
@@ -46,22 +52,58 @@ export class XRMenu {
     c.fillText(line, 35, y);
     this.rects = labels.map((label, i) => {
       const rect = { x: 30 + (i % 2) * 380, y: 240 + Math.floor(i / 2) * 92, w: 360, h: 76 };
-      c.fillStyle = '#294535'; c.fillRect(rect.x, rect.y, rect.w, rect.h);
+      c.fillStyle = pressed.has(i) ? '#527b35' : hovered.has(i) ? '#416e50' : '#294535'; c.fillRect(rect.x, rect.y, rect.w, rect.h);
+      if (hovered.has(i) || pressed.has(i)) {
+        c.strokeStyle = pressed.has(i) ? '#ffffff' : '#d1ff94'; c.lineWidth = 5;
+        c.strokeRect(rect.x + 3, rect.y + 3, rect.w - 6, rect.h - 6);
+      }
       c.fillStyle = '#edffe8'; c.font = '25px sans-serif'; c.fillText(label, rect.x + 18, rect.y + 46);
       return rect;
     });
     c.fillStyle = '#acc8b3'; c.font = '22px sans-serif';
-    c.fillText(state.tear ? 'Pinch both hands / hold triggers, pull apart' : 'Trigger: menu or launch ball', 35, 752);
+    c.fillText('Point to highlight / press trigger to change', 35, 752);
     c.fillText(state.tear ? 'Release to finish | Left grip: move menu' : 'Right grip: pin light | Left grip: move menu', 35, 790);
     this.texture.needsUpdate = true;
   }
-  select(raycaster) {
-    if (!this.mesh.visible) return false;
+  hitTest(raycaster) {
+    if (!this.mesh.visible) return null;
+    this.mesh.updateWorldMatrix(true, false);
     const hit = raycaster.intersectObject(this.mesh)[0];
-    if (!hit) return false;
+    if (!hit) return null;
     const x = hit.uv.x * 800, y = (1 - hit.uv.y) * 840;
     const index = this.rects?.findIndex(r => x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h) ?? -1;
-    if (index >= 0) this.actions[index].run();
+    return { ...hit, index };
+  }
+  updatePointer(raycaster, pointer = 'default') {
+    const hit = raycaster ? this.hitTest(raycaster) : null;
+    const previous = this.pointers.get(pointer) ?? -1;
+    const index = hit?.index ?? -1;
+    if (index < 0) this.pointers.delete(pointer); else this.pointers.set(pointer, index);
+    if (previous !== index) {
+      globalThis.SpatialLog?.record('xr.menu_hover', { pointer, previous, index });
+      this.redraw();
+    }
+    return hit;
+  }
+  redraw() { if (this.state) this.draw(this.state); }
+  release(pointer = 'default') { this.pressed.delete(pointer); this.redraw(); }
+  clearPointer(pointer) { this.updatePointer(null, pointer); this.release(pointer); }
+  clearPointers() { for (const pointer of new Set([...this.pointers.keys(), ...this.pressed.keys()])) this.clearPointer(pointer); }
+  select(raycaster, pointer = 'default') {
+    // One activation per press, even if the pointer moves while held.
+    if (this.pressed.has(pointer)) return true;
+    const hit = this.updatePointer(raycaster, pointer);
+    if (!hit) return false;
+    const index = hit.index;
+    this.pressed.set(pointer, index);
+    if (index >= 0) {
+      globalThis.SpatialLog?.record('xr.menu_action', { pointer, index, label: this.actions[index].label(this.state || {}), uv: hit.uv.toArray() });
+      try {
+        const result = this.actions[index].run();
+        if (result?.catch) result.catch(error => globalThis.SpatialLog?.error('xr.menu_action_failed', error, { index }));
+      } catch (error) { globalThis.SpatialLog?.error('xr.menu_action_failed', error, { index }); throw error; }
+      finally { this.redraw(); }
+    } else globalThis.SpatialLog?.record('xr.menu_padding', { uv: hit.uv.toArray() });
     return true; // Clicking panel padding must not also shoot a ball.
   }
 }

@@ -87,6 +87,7 @@ export class Tear {
   get inMesh() { return this.uniforms.tearBase.value === 1; }
   get progress() { return this.uniforms.tearProgress.value; }
   reset() {
+    if (this.dragging || this.inMesh || this.progress) globalThis.SpatialLog?.record('tear.reset', { inMesh: this.inMesh, progress: this.progress, dragging: this.dragging });
     this.uniforms.tearBase.value = 0;
     this.uniforms.tearProgress.value = 0;
     this.dragging = false; this.animation = null; this.locked = false;
@@ -107,16 +108,20 @@ export class Tear {
     const center = eye.clone().add(new THREE.Vector3(0, 0, -0.65).applyQuaternion(rotation));
     this.orient(center, eye, new THREE.Vector3(1, 0, 0).applyQuaternion(rotation));
     this.animation = 1;
+    globalThis.SpatialLog?.record('tear.button_transition', { from: this.inMesh ? 'mesh' : 'reality', center: center.toArray() });
   }
   cancelGesture() {
-    if (this.dragging) { this.dragging = false; this.animation = 0; this.locked = true; }
+    if (this.dragging) { globalThis.SpatialLog?.record('tear.tracking_cancelled', { progress: this.progress }, 'warn'); this.dragging = false; this.animation = 0; this.locked = true; }
   }
   gesture(left, right, eye) {
     const held = left?.held && right?.held;
     // Missing pose is a cancellation, never an implicit successful release.
     if (!left || !right) { this.cancelGesture(); return; }
     if (!held) {
-      if (this.dragging) { this.dragging = false; this.animation = this.progress >= 0.5 ? 1 : 0; }
+      if (this.dragging) {
+        globalThis.SpatialLog?.record('tear.released', { progress: this.progress, complete: this.progress >= 0.5 });
+        this.dragging = false; this.animation = this.progress >= 0.5 ? 1 : 0;
+      }
       this.locked = false;
       return;
     }
@@ -130,8 +135,14 @@ export class Tear {
       if (center.distanceTo(eye) < 0.15) return;
       this.orient(center, eye, right.position.clone().sub(left.position).normalize());
       this.startSeparation = separation; this.dragging = true;
+      this.loggedProgress = 0;
+      globalThis.SpatialLog?.record('tear.started', { separation, center: center.toArray(), from: this.inMesh ? 'mesh' : 'reality' });
     }
     this.uniforms.tearProgress.value = THREE.MathUtils.clamp((separation - this.startSeparation) / 0.55, 0, 0.9);
+    if (Math.abs(this.progress - this.loggedProgress) >= 0.1) {
+      this.loggedProgress = this.progress;
+      globalThis.SpatialLog?.record('tear.progress', { progress: this.progress, separation });
+    }
   }
   update(dt, eye) {
     this.backdrop.visible = this.enabled;
@@ -142,6 +153,7 @@ export class Tear {
     this.uniforms.tearProgress.value = next;
     if (next === goal) {
       if (goal === 1) this.uniforms.tearBase.value = 1 - this.uniforms.tearBase.value;
+      globalThis.SpatialLog?.record(goal === 1 ? 'tear.completed' : 'tear.closed', { inMesh: this.inMesh });
       this.uniforms.tearProgress.value = 0; this.animation = null;
     }
   }

@@ -87,7 +87,32 @@ export async function run(lab) {
   // Center of the first menu button in canvas coordinates, mapped to the plane.
   const target = new THREE.Vector3((210 / 800 - 0.5) * 0.8, (0.5 - 278 / 840) * 0.84, 0).applyMatrix4(lab.menu.mesh.matrixWorld);
   const ray = new THREE.Raycaster(new THREE.Vector3(0, 1.5, 0), target.clone().sub(new THREE.Vector3(0, 1.5, 0)).normalize());
+  const beforeHover = lab.menu.texture.version;
+  lab.menu.updatePointer(ray, 'left');
+  assert(lab.menu.pointers.get('left') === 0 && lab.state.mode === 'relight' && lab.menu.texture.version > beforeHover,
+    'Pointing highlights a menu control without activating it');
+  const stableHover = lab.menu.texture.version;
+  lab.menu.updatePointer(ray, 'left');
+  assert(lab.menu.texture.version === stableHover, 'Stationary hover does not upload the canvas every frame');
   assert(lab.menu.select(ray) && lab.state.mode === 'solid', 'XR menu ray selects a button and dispatches its action');
+  assert(lab.menu.pressed.get('default') === 0 && lab.menu.lastText.includes('View: Virtual room'), 'Trigger gives pressed feedback and immediately redraws the value');
+  window.menuPressedPreview = lab.menu.canvas.toDataURL('image/png');
+  lab.menu.select(ray);
+  assert(lab.state.mode === 'solid', 'Holding the trigger does not repeatedly change a value');
+  lab.menu.release(); lab.menu.select(ray);
+  assert(lab.state.mode !== 'solid', 'Releasing and pressing again changes the value again');
+  lab.menu.clearPointer('default');
+  assert(lab.menu.pointers.get('left') === 0 && !lab.menu.pressed.size, 'Clearing one pointer preserves the other controller highlight');
+  const paddingTarget = new THREE.Vector3(0, 0.39, 0).applyMatrix4(lab.menu.mesh.matrixWorld);
+  const paddingRay = new THREE.Raycaster(ray.ray.origin.clone(), paddingTarget.sub(ray.ray.origin).normalize());
+  const modeBeforePadding = lab.state.mode;
+  assert(lab.menu.select(paddingRay, 'padding') && lab.state.mode === modeBeforePadding, 'Panel padding consumes the trigger without activating a control');
+  lab.menu.updatePointer(null, 'left');
+  assert(!lab.menu.pointers.size, 'Pointing away removes the highlight');
+  lab.menu.mesh.visible = false;
+  assert(lab.menu.updatePointer(ray, 'right') === null, 'Hidden menu cannot acquire hover');
+  lab.menu.clearPointers();
+  assert(!lab.menu.pointers.size && !lab.menu.pressed.size, 'Tracking or session cleanup clears all menu feedback');
   lab.menu.mesh.visible = false; lab.state.mode = 'relight'; lab.syncStyle();
   const tear = new Tear(new THREE.Scene());
   const eye = new THREE.Vector3(0, 1.6, 0);

@@ -12,6 +12,7 @@ const up = new THREE.Vector3(0, 1, 0);
 export class HandInput {
   constructor(scene, uniforms) {
     this.pinches = new WeakMap();
+    this.poseTimes = new WeakMap();
     const material = new THREE.MeshBasicMaterial({ color: '#86dfff', transparent: true, depthTest: false, depthWrite: false });
     maskMaterial(material, uniforms);
     this.joints = new THREE.InstancedMesh(new THREE.SphereGeometry(1, 8, 6), material, 50);
@@ -62,9 +63,18 @@ export class HandInput {
       if (thumb && index) {
         // Hysteresis prevents a noisy fingertip estimate from rapidly releasing.
         const held = thumb.distanceTo(index) < (this.pinches.get(source) ? 0.04 : 0.025);
+        if (this.pinches.get(source) !== held) globalThis.SpatialLog?.record('hand.pinch', { handedness: source.handedness, held, gap: thumb.distanceTo(index), menuConsumed: Boolean(blocked) });
         this.pinches.set(source, held);
         result[source.handedness] = { position: thumb.clone().add(index).multiplyScalar(0.5), held: held && !blocked };
-      } else this.pinches.delete(source);
+      } else {
+        if (this.pinches.has(source)) globalThis.SpatialLog?.record('hand.tracking_lost', { handedness: source.handedness }, 'warn');
+        this.pinches.delete(source);
+      }
+      if (globalThis.SpatialLog?.motion && performance.now() - (this.poseTimes.get(source) || 0) >= 200) {
+        this.poseTimes.set(source, performance.now());
+        globalThis.SpatialLog.record('hand.pose_sample', { handedness: source.handedness,
+          joints: Object.fromEntries([...poses].map(([name, position]) => [name, position.toArray()])) }, 'debug');
+      }
     }
     this.joints.count = jointCount; this.bones.count = boneCount;
     this.joints.instanceMatrix.needsUpdate = true; this.bones.instanceMatrix.needsUpdate = true;

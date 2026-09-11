@@ -1,6 +1,8 @@
-# Spatial Mapping
+﻿# Spatial Mapping
 
-A static Three.js + WebXR room laboratory for Quest 3. No bundler, npm install, framework, backend, or build step. Open `index.html` through a web server. Three.js **0.180.0** and Rapier **0.17.3** load as pinned ES modules from jsDelivr; Rapier's compat module embeds its WASM.
+A static Three.js + WebXR room laboratory for Quest 3. No bundler, npm install, framework, or build step. GitHub Pages needs no backend; the optional local Node server also saves debug recordings. Open `index.html` through a web server. Three.js **0.180.0** and Rapier **0.17.3** load as pinned ES modules from jsDelivr; Rapier's compat module embeds its WASM.
+
+**Start here for development:** [Local setup, USB Quest testing, Chrome DevTools, troubleshooting, and full session logs](./LOCAL_DEBUGGING.md).
 
 ## Reality → Mesh → Reality
 
@@ -162,13 +164,16 @@ Useful next steps, in order:
 | `tear.js` | Shared world-space aperture shaders and reversible gesture/animation state |
 | `hand-input.js` | Joint-pose sampling, pinch hysteresis, controller grip positions, procedural hand visuals |
 | `serve.mjs` | Optional dependency-free localhost server; not needed by Pages |
+| `logger.js` | Early error capture, interaction records, IndexedDB persistence, server retry queue, downloads |
+| `logs.html` | Local server's live session viewer, filters, and full-file downloads |
+| `LOCAL_DEBUGGING.md` | Detailed local setup, Quest/ADB/DevTools workflow, recording format and recovery |
 | `tests/` | Optional browser regression harness; not part of the app startup |
 
 Physics uses a fixed 90 Hz timestep with a capped catch-up interval. Balls use continuous collision detection, expire after 45 seconds, and are capped at 32. Rendering uses a capped pixel ratio and requests foveation; geometry only rebuilds on detected revisions. Large scans still need profiling on the Quest. There is no fallback collision floor in AR: missing scene data should be visible as a problem, not disguised.
 
 An XR session starts with a zero camera offset so the desktop orbit position cannot displace the real room. Origin resets clear balls and release the pinned light. Tracking loss disables room rendering/collision; the last known transforms can still be exported when the session ends. An ordinary session exit returns to the synthetic desktop preview and retains the last captured snapshot in memory. Reloading the page clears that snapshot. OBJ contains geometry only, with no texture, anchors, or automatic import/re-alignment.
 
-Room geometry stays in browser memory unless you explicitly download it. The app has no upload or logging endpoint. Its dependency modules are downloaded from jsDelivr.
+Room mesh buffers stay in browser memory unless you explicitly export them. The app automatically records interactions, errors, lifecycle events, and sampled poses in IndexedDB. On the local server those records are also uploaded to the same origin and saved as append-only `logs/session-<id>.ndjson` files. On GitHub Pages they remain in the browser until downloaded. The recorder includes positions/hand joints when pose sampling is enabled, but does not record camera images, audio, or video. See [recording scope and delivery limits](./LOCAL_DEBUGGING.md#4-record-a-reproducible-test-session). Dependency modules are downloaded from jsDelivr.
 
 ## Validation and headset checklist
 
@@ -180,7 +185,7 @@ node tests/smoke.mjs
 
 On Windows the harness defaults to Chrome in Program Files; set `CHROME_PATH` for another executable. It uses hidden headless Chrome and built-in Node APIs, starts an ephemeral loopback server, loads the actual CDN dependencies, and saves screenshots in ignored `.test-output/`. No package installation is needed.
 
-Checks cover concave plane triangulation, mesh/plane precedence, pose-only updates, triangle collision, geometry replacement, tracking loss/recovery, collider cleanup, OBJ transforms, render modes, ball limits, desktop controls, XR menu ray selection, and mobile overflow. Synthetic XR frame data exercises the mapping lifecycle. Additional tests cover reversible tear gestures, small-tear cancellation, hand-tracking loss, pinch hysteresis, menu input consumption, and GPU framebuffer alpha for reality, mesh, and both partial-transition directions. The latest browser run passed 37 checks; preview screenshots include `tear.png` and `mesh.png`. **These checks do not validate a real immersive session, Quest permissions, scan quality, tracking alignment, or headset performance.**
+Checks cover concave plane triangulation, mesh/plane precedence, pose-only updates, triangle collision, geometry replacement, tracking loss/recovery, collider cleanup, OBJ transforms, render modes, ball limits, desktop controls, XR menu ray selection, and mobile overflow. Synthetic XR frame data exercises the mapping lifecycle. Additional tests cover reversible tear gestures, small-tear cancellation, hand-tracking loss, pinch hysteresis, menu input consumption, and GPU framebuffer alpha for reality, mesh, and both partial-transition directions. Logging tests cover durable writes, deduplication across restarts, disk failure, error/interaction capture, IndexedDB reload recovery, browser-only recording, retrying old events, a real blocked-CDN startup failure, and the PC viewer. The latest run passed **76 checks**; preview screenshots include `tear.png`, `mesh.png`, and `logs.png`. **These checks do not validate a real immersive session, Quest permissions, scan quality, tracking alignment, or headset performance.**
 
 On the device, verify:
 
@@ -212,3 +217,8 @@ Reviewed September 9, 2026. Runtime support should still be checked on your part
 - [Rapier JavaScript colliders](https://rapier.rs/docs/user_guides/javascript/colliders/) — triangle meshes and dynamic collider shapes.
 - [WebXR Hand Input specification](https://immersive-web.github.io/webxr-hand-input/) — optional hand tracking and joint poses.
 - [Three.js documentation](https://threejs.org/docs/) — WebXRManager, rendering, and materials.
+
+Independent critic review: see [REVIEW.md](REVIEW.md) for findings, fixes and the remaining Quest checks.
+
+Menu interaction: point a controller (or supported hand-selection ray) at a control to highlight it. Press the trigger to cycle its value or run its action; the label updates immediately. Release before pressing again. Each controller has independent hover feedback. Pointing away, tracking loss, and leaving AR clear highlights. Panel padding consumes the press so it cannot launch a ball. Hover transitions are recorded as xr.menu_hover.
+

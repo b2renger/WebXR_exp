@@ -66,10 +66,10 @@ try {
   }
   if (!ready) throw new Error('App did not start: ' + await evaluate('document.getElementById("status")?.textContent') + '\n' + errors.join('\n'));
   console.log('App loaded with real CDN dependencies. Running geometry, physics, and UI regressions…');
-  const results = await evaluate('import("./tests/regression.js").then(m => m.run(window.spatialLab))');
+  const results = await evaluate('import("./tests/regression.js").then(m => m.run(window.__placer))');
   results.forEach(result => console.log('PASS ' + result));
   await new Promise(resolve => setTimeout(resolve, 500));
-  if (errors.length) throw new Error(errors.join('\n'));
+  if (errors.some(e => !e.includes('SPATIAL_LOG_TEST_'))) throw new Error(errors.join('\n'));
   const loggingChecks = await evaluate('import("./tests/logging.js").then(m => m.testLogging())');
   loggingChecks.forEach(result => console.log('PASS ' + result));
   const unexpected = errors.filter(error => !error.includes('SPATIAL_LOG_TEST_'));
@@ -77,23 +77,12 @@ try {
   const screenshot = await send('Page.captureScreenshot', { format: 'png' });
   const outputDirectory = fileURLToPath(new URL('../.test-output/', import.meta.url));
   await mkdir(outputDirectory, { recursive: true });
-  const menuPreview = await evaluate('window.menuPressedPreview');
-  await writeFile(path.join(outputDirectory, 'menu-pressed.png'), Buffer.from(menuPreview.split(',')[1], 'base64'));
   const screenshotPath = path.join(outputDirectory, 'desktop.png');
   await writeFile(screenshotPath, Buffer.from(screenshot.data, 'base64'));
   console.log('Screenshot: ' + screenshotPath);
-  await evaluate('spatialLab.state.mode = "tear"; spatialLab.syncStyle(); spatialLab.tear.toggle(spatialLab.camera); spatialLab.tear.animation = null; spatialLab.tear.uniforms.tearProgress.value = 0.2;');
-  await new Promise(resolve => setTimeout(resolve, 300));
-  const tearPreview = await send('Page.captureScreenshot', { format: 'png' });
-  await writeFile(path.join(outputDirectory, 'tear.png'), Buffer.from(tearPreview.data, 'base64'));
-  await evaluate('spatialLab.tear.uniforms.tearProgress.value = 0; spatialLab.tear.uniforms.tearBase.value = 1;');
-  await new Promise(resolve => setTimeout(resolve, 300));
-  const meshPreview = await send('Page.captureScreenshot', { format: 'png' });
-  await writeFile(path.join(outputDirectory, 'mesh.png'), Buffer.from(meshPreview.data, 'base64'));
-  await evaluate('spatialLab.state.mode = "relight"; spatialLab.syncStyle();');
   await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
   await new Promise(resolve => setTimeout(resolve, 300));
-  const fits = await evaluate('document.documentElement.scrollWidth <= innerWidth');
+  const fits = await evaluate('document.documentElement.scrollWidth <= innerWidth && document.getElementById("ui").getBoundingClientRect().right <= innerWidth');
   if (!fits) throw new Error('Mobile layout overflows viewport');
   const mobile = await send('Page.captureScreenshot', { format: 'png' });
   await writeFile(path.join(outputDirectory, 'mobile.png'), Buffer.from(mobile.data, 'base64'));
@@ -121,6 +110,16 @@ try {
   const recovered = await fetch(`http://127.0.0.1:${port}/__logs/download/${offlineSid}.ndjson`).then(r => r.text());
   if (!recovered.includes('OFFLINE_RECOVERY_MARKER')) throw new Error('Unsent previous-session events were not recovered');
   console.log('PASS Unsent events from a previous page are uploaded when server logging resumes');
+  await evaluate('localStorage.setItem("splat-placer-v2:" + location.pathname, "INVALID_LAYOUT_FIXTURE")');
+  // Reload without pagehide autosaving over the fixture: CDP assigns on the next document.
+  const fixture = await send('Page.addScriptToEvaluateOnNewDocument', {source:'localStorage.setItem("splat-placer-v2:" + location.pathname, "INVALID_LAYOUT_FIXTURE");'});
+  const oldSid = await evaluate('SpatialLog.status.sid');
+  await send('Page.navigate', {url:`http://127.0.0.1:${port}/?test`});await waitForNewPage(oldSid);
+  await send('Page.removeScriptToEvaluateOnNewDocument', {identifier:fixture.identifier});
+  const keptInvalid=await evaluate('window.dispatchEvent(new PageTransitionEvent("pagehide")); localStorage.getItem("splat-placer-v2:" + location.pathname) === "INVALID_LAYOUT_FIXTURE"');
+  if (!keptInvalid) throw new Error('Invalid saved layout was overwritten on pagehide');
+  await evaluate('__placer.importLayout(JSON.stringify({version:2,anchorUUID:null,items:[]}))');
+  console.log('PASS Invalid saved layout survives pagehide until a valid import replaces it');
   const unexpectedFinal = errors.filter(error => !error.includes('SPATIAL_LOG_TEST_'));
   if (unexpectedFinal.length) throw new Error(unexpectedFinal.join('\n'));
   const beforeFailure = await evaluate('SpatialLog.status.sid');
@@ -137,7 +136,7 @@ try {
     await new Promise(resolve => setTimeout(resolve, 150));
   }
   if (!failureCaptured) throw new Error('Dependency failure fixture did not reach the startup error handler: ' + await evaluate('JSON.stringify({status: document.getElementById("status")?.textContent, ready: document.body?.dataset.ready, tail: window.SpatialLog?.tail().slice(-6)})'));
-  const startupLog = await evaluate('SpatialLog.entries().then(events => events.some(e => e.event === "console.error") && events.some(e => e.event === "page.start") && !events.some(e => e.event === "app.ready"))');
+  const startupLog = await evaluate('SpatialLog.entries().then(events => events.some(e => e.event === "app.startup_failed") && events.some(e => e.event === "page.start") && !events.some(e => e.event === "splat.ready"))');
   if (!startupLog) throw new Error('Recorder did not capture startup failure before app initialization');
   if (errors.slice(failureErrorOffset).some(error => !/Failed to fetch|dynamically imported module/.test(error))) throw new Error('Unexpected error in startup-failure fixture');
   await evaluate('SpatialLog.flush()');
@@ -155,7 +154,7 @@ try {
   const viewerScreenshot = await send('Page.captureScreenshot', { format: 'png' });
   await writeFile(path.join(outputDirectory, 'logs.png'), Buffer.from(viewerScreenshot.data, 'base64'));
   console.log('PASS PC log viewer displays saved events and a full-session download');
-  console.log(`Completed ${results.length + loggingChecks.length + serverChecks.length + 6} checks without unexpected browser errors.`);
+  console.log(`Completed ${results.length + loggingChecks.length + serverChecks.length + 7} checks without unexpected browser errors.`);
 } finally {
   socket?.close(); browser.kill(); await server.logsSettled(); server.closeAllConnections(); server.close();
   // Retain isolated temp profile; no recursive filesystem deletion in the harness.

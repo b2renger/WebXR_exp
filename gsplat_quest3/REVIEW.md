@@ -33,3 +33,13 @@ The old lossy recorder/server is replaced with the durable static-compatible rec
 Validation: **54 checks passed**, including real bundled SOG loading with Spark, delayed fitting, invalid-import preservation, active-frame anchoring, stale restore rejection, pinch persistence, input cancellation, missing-asset preservation, invalid-storage preservation, range requests, durable logging and blocked-CDN startup. Paged RAD asset loading and actual GPU depth occlusion need manual validation; the included captures are SOG files. Run node tests/smoke.mjs.
 
 
+
+## Placement follow-up — 2026-09-14
+
+Added an explicit Place button and a real browser click-path regression. Fixed silent queued-placement loss on a transient missing hit, added actionable rejection diagnostics, exposed placement messages in the headset HUD, and prevented failed loads from being reported as successfully placed. Full suite: 58 checks. No recent local Quest recordings were available to identify the reported headset failure; no physical headset test was performed. This follow-up was not independently critic-reviewed.
+
+
+## Premature placement success / hidden anchors — 2026-09-14
+
+Removed the load-complete Placed message, added per-item geometry/anchor status, made the selection marker visible over depth, and preserved the hit-test position while a newly created anchor waits for its first pose. A three-second timeout switches to a fixed session pose; previously localized anchors still hide on tracking loss and recover normally. Five new regressions cover these cases (63 checks total). This reproduces a code path consistent with the reported symptom, not a confirmed diagnosis from Quest recordings; no hardware test or new critic review was performed.
+

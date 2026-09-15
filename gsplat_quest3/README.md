@@ -12,7 +12,7 @@ Install Node.js 22 or later and run in this directory:
 node serve.mjs
 ```
 
-Open <http://localhost:8443>. Shift-click the ground to place the selected library asset. Use a small capture first; runtime LOD construction can take time and memory. The included `splat.sog` is the smallest sample.
+Open <http://localhost:8443>. Choose a library asset, click **Place selected asset**, then click the ground. Shift-click the ground is also supported; selecting a library row alone does not place anything. Use a small capture first; runtime LOD construction can take time and memory. The included `splat.sog` is the smallest sample.
 
 For Quest USB development, enable Quest developer mode and USB debugging, connect a data cable, accept the headset's debugging prompt, then run:
 
@@ -75,9 +75,13 @@ node tests/smoke.mjs
 
 The runner needs Node 22+, installed Chrome (`CHROME_PATH` can override its path), and CDN access. It starts an isolated server and browser profile. It loads a real bundled SOG with Spark and tests layout preservation, active-frame anchor creation, late async results, pinch saving, input cancellation, byte-range serving, durable log sync, offline recovery, and failed startup recording. Screenshots go to `.test-output/`. Temporary profiles and log directories are retained under the OS temp directory for inspection.
 
-The latest automated run passed **54 checks**. These checks use synthetic XR objects for lifecycle tests; they do not certify real Quest tracking, stereo rendering, permissions, anchor localization, or frame rate. See [REVIEW.md](REVIEW.md) for the critic review and remaining hardware checks.
+The latest automated run passed **63 checks**. These checks use synthetic XR objects for lifecycle tests; they do not certify real Quest tracking, stereo rendering, permissions, anchor localization, or frame rate. See [REVIEW.md](REVIEW.md) for the critic review and remaining hardware checks.
 
 ## Files
 
 `index.html` contains UI and the import map; `app.js` contains rendering and interaction logic. `logger.js` starts recording before modules load. `serve.mjs` is the optional local server and durable log receiver; `logs.html` is its PC viewer. Both XR experiments intentionally carry standalone copies of the same recorder/protocol/server implementation so either directory can be hosted alone.
+
+
+
+Placement visibility: a newly created room anchor can take time to produce a pose. The chosen hit-test position stays visible for up to three seconds while waiting; if the anchor never localizes, the app keeps that fixed session position and detaches the persistent handle. A previously tracked anchor still hides the layout on tracking loss. Status distinguishes loading, waiting for geometry, hidden tracking, and loaded at marker; loaded data is not proof of visible splat pixels. The selection box is drawn over depth occlusion so a visible box with missing splats points to a rendering/depth problem. For that case, disable Real-world occlusion before re-entering AR and download the recording.
 

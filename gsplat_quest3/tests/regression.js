@@ -4,11 +4,14 @@ export async function run(app) {
   const check = (ok, name) => { if (!ok) throw new Error(name); results.push(name); };
   const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
   const storeKey = 'splat-placer-v2:' + location.pathname;
-  const item = app.placeItem(app.library.find(a => a.name === 'splat.sog'), new THREE.Vector3(), 0);
+  const item = app.items[0]; // Created through the real Place button and canvas input by smoke.mjs.
   await item.ready;
   for (let i=0; i<60 && !item._fitted; i++) await pause(250);
   check(item.loaded && item._fitted && item.splat.numSplats > 0, 'Real SOG loads and fits with Spark runtime LOD');
   check(Math.abs(item.rig.scale.x - item.baseScale) < 0.001, 'Delayed loading auto-fits untouched selected item');
+  await pause(750); // Let Spark finish its asynchronous first sort before the visual check.
+  app.renderer.render(item.rig.parent.parent, app.camera);
+  window.splatPlacementPreview = app.renderer.domElement.toDataURL('image/png');
   item.rig.position.x = 1.23; app.saveNow();
   const before = localStorage.getItem(storeKey), beforeItem = app.items[0];
   for (const text of ['{bad', JSON.stringify({version:2, items:[{id:'bad',src:'javascript:alert(1)',pos:[0,0,0],yaw:0,scale:1,name:'bad'}]}), JSON.stringify({version:2, items:[{...item.toJSON(),scale:-1}]})]) {
@@ -37,6 +40,27 @@ export async function run(app) {
     check(calls===0 && app.state.pendingPlacement, 'Controller select queues placement without using an expired frame');
     active=true; app.processPlacement(frame); active=false; await pause(0);
     check(calls===1 && app.state.xrAnchor===anchor, 'Anchor creation runs synchronously inside active frame processing');
+    app.updateRoomAnchor({getPose:()=>null},{});
+    check(app.anchorNode.visible && app.anchorNode.position.x===1, 'New anchor without a first pose keeps the valid placement visible');
+    app.updateRoomAnchor({getPose:()=>null},{},Infinity);
+    check(app.anchorNode.visible && !app.state.xrAnchor && !app.state.persistedAnchorUUID, 'Unlocalized new anchor falls back to the chosen position without an obsolete handle');
+    await app.makeRoomAnchor(new THREE.Vector3(),0,{createAnchor:async()=>({anchorSpace:{},delete(){}})});
+    const localizedFrame={getPose:()=>({transform:{position:{x:0,y:0,z:-1},orientation:{x:0,y:0,z:0,w:1}}})};
+    app.updateRoomAnchor(localizedFrame,{});app.updateRoomAnchor({getPose:()=>null},{});
+    check(!app.anchorNode.visible,'Previously localized anchor hides the layout when tracking is lost');
+    app.reportPlacement();
+    check(document.getElementById('status').textContent.includes('tracking unavailable'), 'Loaded but hidden asset reports tracking failure rather than placement success');
+    app.updateRoomAnchor(localizedFrame,{});app.reportPlacement();
+    check(app.anchorNode.visible && document.getElementById('status').textContent.includes('Loaded at marker'), 'Tracking recovery restores the layout and truthful status');
+    app.configureTest({roomAnchored:false,placing:false,lastHitPose:null});
+    app.onTrigger(right);app.processPlacement(frame);
+    check(app.state.pendingPlacement && calls===1, 'A temporarily missing surface does not discard the placement request');
+    app.configureTest({lastHitPose:{position:new THREE.Vector3(),yaw:0}});
+    active=true;app.processPlacement(frame);active=false;await pause(0);
+    check(!app.state.pendingPlacement && calls===2, 'Placement commits once the surface returns in an active frame');
+    app.configureTest({roomAnchored:false,lastHitPose:null});app.onTrigger(right);
+    app.configureTest({placementDeadline:0});app.processPlacement(frame);
+    check(!app.state.pendingPlacement && document.getElementById('status').textContent.includes('No surface found'), 'Missing surfaces produce an actionable error instead of a silent trigger');
     let finish; const late={delete(){this.deleted=true;}};
     const pending=app.makeRoomAnchor(new THREE.Vector3(),0,{createAnchor:()=>new Promise(r=>finish=r)});
     session=null; app.invalidateAnchors(); finish(late); await pending;

@@ -66,6 +66,12 @@ try {
   }
   if (!ready) throw new Error('App did not start: ' + await evaluate('document.getElementById("status")?.textContent') + '\n' + errors.join('\n'));
   console.log('App loaded with real CDN dependencies. Running geometry, physics, and UI regressions…');
+  await evaluate(`document.querySelectorAll('.lib-row')[1].click(); document.getElementById('b-place').click();`);
+  const groundClick = await evaluate(`(() => { const p = __placer.camera.position.clone().set(0, 0, 0).project(__placer.camera); return {x:(p.x+1)*innerWidth/2,y:(1-p.y)*innerHeight/2}; })()`);
+  await send('Input.dispatchMouseEvent', {type:'mousePressed',x:groundClick.x,y:groundClick.y,button:'left',clickCount:1});
+  await send('Input.dispatchMouseEvent', {type:'mouseReleased',x:groundClick.x,y:groundClick.y,button:'left',clickCount:1});
+  if (!await evaluate('__placer.items.length === 1')) throw new Error('Place button and real canvas click did not create an asset');
+  console.log('PASS Place button plus real desktop click creates the selected asset');
   const results = await evaluate('import("./tests/regression.js").then(m => m.run(window.__placer))');
   results.forEach(result => console.log('PASS ' + result));
   await new Promise(resolve => setTimeout(resolve, 500));
@@ -77,6 +83,8 @@ try {
   const screenshot = await send('Page.captureScreenshot', { format: 'png' });
   const outputDirectory = fileURLToPath(new URL('../.test-output/', import.meta.url));
   await mkdir(outputDirectory, { recursive: true });
+  const placementPreview = await evaluate('window.splatPlacementPreview');
+  await writeFile(path.join(outputDirectory, 'placed-asset.png'), Buffer.from(placementPreview.split(',')[1], 'base64'));
   const screenshotPath = path.join(outputDirectory, 'desktop.png');
   await writeFile(screenshotPath, Buffer.from(screenshot.data, 'base64'));
   console.log('Screenshot: ' + screenshotPath);
@@ -154,7 +162,7 @@ try {
   const viewerScreenshot = await send('Page.captureScreenshot', { format: 'png' });
   await writeFile(path.join(outputDirectory, 'logs.png'), Buffer.from(viewerScreenshot.data, 'base64'));
   console.log('PASS PC log viewer displays saved events and a full-session download');
-  console.log(`Completed ${results.length + loggingChecks.length + serverChecks.length + 7} checks without unexpected browser errors.`);
+  console.log(`Completed ${results.length + loggingChecks.length + serverChecks.length + 8} checks without unexpected browser errors.`);
 } finally {
   socket?.close(); browser.kill(); await server.logsSettled(); server.closeAllConnections(); server.close();
   // Retain isolated temp profile; no recursive filesystem deletion in the harness.

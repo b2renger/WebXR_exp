@@ -1,4 +1,4 @@
-
+﻿
 import * as THREE from 'three';
 import { SparkRenderer, SplatMesh } from '@sparkjsdev/spark';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -156,6 +156,9 @@ class PlacedItem {
     this.localBounds = new THREE.Box3(
       new THREE.Vector3(-0.25, 0, -0.25), new THREE.Vector3(0.25, 0.5, 0.25));
     this.boxHelper = new THREE.Box3Helper(this.localBounds, 0x2d7ef7);
+    // Keep the placement marker readable even when real-world depth hides splats.
+    this.boxHelper.material.depthTest = false; this.boxHelper.material.depthWrite = false;
+    this.boxHelper.renderOrder = 1001;
     this.boxHelper.visible = false;
     this.rig.add(this.boxHelper);
 
@@ -257,11 +260,29 @@ function placeItem(asset, localPos, yawLocal) {
   it.rig.position.copy(localPos);
   it.rig.rotation.y = yawLocal;
   items.push(it);
+  placementWatch = it;
   selectItem(it);
   say('Placing ' + asset.name + '…');
-  it.ready.then(() => { if (!it._removed) say('Placed ' + asset.name + '.'); }).catch(() => {});
+  it.ready.then(() => reportPlacement()).catch(() => {});
   saveLayout();
   return it;
+}
+let placementWatch = null, placementReport = '';
+function reportPlacement() {
+  const it = placementWatch;
+  if (!it || it._removed) return;
+  const reason = it.failed ? 'load_failed' : !it.loaded ? 'loading' : !it._fitted ? 'waiting_for_geometry' :
+    !anchorNode.visible ? 'anchor_not_visible' : 'position_ready';
+  const signature = it.id + ':' + reason;
+  if (signature === placementReport) return;
+  placementReport = signature;
+  L('placement_status', { id: it.id, reason, loaded: it.loaded, fitted: it._fitted, splats: it.splat.numSplats,
+    anchorVisible: anchorNode.visible, position: it.rig.position.toArray(), scale: it.rig.scale.x });
+  if (reason === 'load_failed') say('Asset failed to load. Open Logs for the error.', true);
+  else if (reason === 'loading') say('Loading ' + it.asset.name + '...');
+  else if (reason === 'waiting_for_geometry') say('Loaded data; waiting for geometry...');
+  else if (reason === 'anchor_not_visible') say('Asset hidden: room tracking unavailable.', true);
+  else say('Loaded at marker: ' + it.asset.name + '.');
 }
 
 // ---------------------------------------------------------------------------
@@ -323,6 +344,12 @@ function importLayout(text) {
 addEventListener('pagehide', saveNow);
 
 document.getElementById('b-delete').onclick = () => { if (selected) { selected.remove(); saveLayout(); say('Deleted.'); } };
+document.getElementById('b-place').onclick = () => {
+  placing = true;
+  L('placement_mode', { enabled: true, source: 'button', asset: library[currentAsset]?.name });
+  say(renderer.xr.isPresenting ? 'Aim your head at a surface until the ring appears, then press trigger.' : 'Click the ground to place ' + library[currentAsset]?.name + '. Escape cancels.');
+  hud.refresh();
+};
 document.getElementById('b-clear').onclick  = () => { [...items].forEach((i) => i.remove()); saveLayout(); say('Cleared.'); };
 document.getElementById('b-export').onclick = () => {
   downloadFile('splat-layout.json',
@@ -359,9 +386,9 @@ const hud = (() => {
     if (ctx.roundRect) { ctx.beginPath(); ctx.roundRect(0, 0, 512, 96, 20); ctx.fill(); }
     else ctx.fillRect(0, 0, 512, 96);
     ctx.fillStyle = '#cfe3ff'; ctx.font = '600 30px sans-serif';
-    ctx.fillText((placing ? '▸ PLACE: ' + (library[currentAsset] ? library[currentAsset].name : '') : lastMsg).slice(0, 30), 18, 40);
+    ctx.fillText(lastMsg.slice(0, 34), 18, 40);
     ctx.fillStyle = '#8fa2b8'; ctx.font = '24px sans-serif';
-    ctx.fillText(placing ? 'stick ◂▸ asset · trigger place' : 'A place · B delete · grip drag', 18, 76);
+    ctx.fillText(placing ? 'Aim HEAD at floor · trigger at ring' : 'A place · B delete · grip drag', 18, 76);
     tex.needsUpdate = true;
   }
   return { mesh, set(m) { lastMsg = m; draw(); }, refresh: draw };
@@ -483,11 +510,14 @@ function setAnchorPose(position, yaw) {
 }
 
 let anchorGeneration = 0, pendingPlacement = false, xrTracking = false, lastCancelReason = null;
+let placementDeadline = 0;
+let anchorHasPose = false, anchorPoseDeadline = 0;
 let trackedSources = new Set();
 function invalidateAnchors() {
   anchorGeneration++;
   xrAnchor?.delete?.(); xrAnchor = null;
   restorePending = false;
+  anchorHasPose = false; anchorPoseDeadline = 0;
 }
 async function makeRoomAnchor(position, yaw, frame) {
   const previousUUID = persistedAnchorUUID;
@@ -503,7 +533,7 @@ async function makeRoomAnchor(position, yaw, frame) {
     const q = anchorNode.quaternion;
     const anchor = await frame.createAnchor(new XRRigidTransform(position, q), refSpace);
     if (!live()) { anchor.delete?.(); return; }
-    xrAnchor = anchor; L('anchor', 'created');
+    xrAnchor = anchor; anchorPoseDeadline = performance.now() + 3000; L('anchor', 'created');
     if (document.getElementById('persist-anchor').checked && anchor.requestPersistentHandle) {
       const uuid = await anchor.requestPersistentHandle();
       if (!live()) { if (uuid !== persistedAnchorUUID) session.deletePersistentAnchor?.(uuid).catch(() => {}); return; }
@@ -528,8 +558,42 @@ function beginRestore(session) {
 }
 function processPlacement(frame) {
   if (!pendingPlacement) return;
-  pendingPlacement = false;
-  if (frame && lastHitPose && !restorePending) placeOrAnchorAtHit(frame);
+  if (frame && lastHitPose && !restorePending) {
+    pendingPlacement = false;
+    L('placement_commit', { position: lastHitPose.position.toArray(), asset: library[currentAsset]?.name });
+    placeOrAnchorAtHit(frame);
+  } else if (performance.now() >= placementDeadline) {
+    pendingPlacement = false;
+    L('placement_blocked', { reason: 'no_surface_hit', hitTestReady: Boolean(hitTestSource) });
+    say('No surface found. Aim your head at the floor until the ring appears, then press trigger again.', true);
+  }
+}
+function updateRoomAnchor(frame, refSpace, now = performance.now()) {
+  if (!xrAnchor) return;
+  const pose = frame.getPose(xrAnchor.anchorSpace, refSpace);
+  if (!pose) {
+    if (!anchorHasPose && !restorePending) {
+      // A newly created anchor may not have a pose yet. The hit-test position is
+      // already valid: don't make the just-loaded object disappear while waiting.
+      anchorNode.visible = true;
+      if (now >= anchorPoseDeadline) {
+        invalidateAnchors(); persistedAnchorUUID = null; saveNow();
+        L('anchor_fixed_pose_fallback', { reason: 'new_anchor_never_localized' });
+        say('Anchor unavailable; keeping the chosen position.', true);
+      }
+    } else {
+      anchorNode.visible = false;
+      cancelInput('anchor tracking unavailable');
+    }
+    return;
+  }
+  anchorHasPose = true; anchorNode.visible = true;
+  const p = pose.transform.position, o = pose.transform.orientation;
+  anchorNode.position.set(p.x, p.y, p.z); anchorNode.quaternion.set(o.x, o.y, o.z, o.w);
+  _v.set(0, 0, -1).applyQuaternion(anchorNode.quaternion);
+  anchorYaw = Math.atan2(-_v.x, -_v.z);
+  roomAnchored = true;
+  if (restorePending) { restorePending = false; L('anchor', 'restored anchor localized'); say('Layout restored to the room.'); }
 }
 async function setupHitTest(session) {
   const live = () => renderer.xr.getSession() === session;
@@ -668,13 +732,24 @@ function itemUnderRay(c) {
 
 function onTrigger(c) {
   L('trigger', c.userData.handedness);
-  if (!renderer.xr.isPresenting || !xrTracking || restorePending || !c.visible) return;
+  const blocked = !renderer.xr.isPresenting ? 'not_in_ar' : !xrTracking || !c.visible ? 'tracking_unavailable' : restorePending ? 'restoring_anchor' : null;
+  if (blocked) {
+    L('placement_blocked', { reason: blocked });
+    say(blocked === 'restoring_anchor' ? 'Still restoring the room anchor. Wait for the ring before placing.' : 'Tracking unavailable. Look around and keep your controller visible.', true);
+    return;
+  }
   // a surface hit while placing — or before the layout is anchored — consumes the
   // trigger. While a persisted-anchor restore is pending, re-anchoring is blocked:
   // it would delete the persisted anchor mid-restore.
-  if (lastHitPose && (placing || (!roomAnchored && !restorePending))) { pendingPlacement = true; return; }
+  if (placing || !roomAnchored) {
+    if (!pendingPlacement) { pendingPlacement = true; placementDeadline = performance.now() + 1000; }
+    L('placement_requested', { hit: Boolean(lastHitPose), hitTestReady: Boolean(hitTestSource), asset: library[currentAsset]?.name });
+    if (!lastHitPose) say('Looking for a surface. Aim your head at the floor, not the controller ray.');
+    return;
+  }
   const it = itemUnderRay(c);
   if (it) selectItem(it);
+  else { L('selection_missed'); say('No object selected. Press A/X to place another asset.'); }
 }
 
 function placeOrAnchorAtHit(frame) {
@@ -828,6 +903,7 @@ const typingInField = () => {
   return !!(ae && ae.tagName === 'INPUT' && (ae.type === 'text' || ae.type === 'search'));
 };
 addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !typingInField()) { placing = false; pendingPlacement = false; say('Placement cancelled.'); hud.refresh(); }
   if (!typingInField() && !e.repeat) L('key_down', e.key);
   keys.add(e.key.toLowerCase());
   if ((e.key === 'Delete' || e.key === 'Backspace') && selected && !typingInField()) {
@@ -861,12 +937,13 @@ renderer.domElement.addEventListener('pointerdown', (e) => {
   if (renderer.xr.isPresenting || e.button !== 0) return;
   const nx = (e.clientX / innerWidth) * 2 - 1, ny = -(e.clientY / innerHeight) * 2 + 1;
   pointerRay.setFromCamera(new THREE.Vector2(nx, ny), camera);
-  if (e.shiftKey) {                                   // shift-click: place on ground
+  if (e.shiftKey || placing) {                        // explicit Place mode or shift-click
     const hit = new THREE.Vector3();
     if (pointerRay.ray.intersectPlane(groundPlane, hit) && library[currentAsset]) {
       anchorNode.updateMatrixWorld(true);
       placeItem(library[currentAsset], anchorNode.worldToLocal(hit), 0);
-    }
+      placing = false; hud.refresh();
+    } else { L('placement_blocked', { reason: 'desktop_ray_misses_ground' }); say('Point lower: click the ground grid to place the asset.', true); }
     return;
   }
   // plain click: select
@@ -942,29 +1019,7 @@ function animate(time, frame) {
     }
   }
 
-  // keep the room anchor glued to its real pose
-  if (xrTracking && frame && xrAnchor && refSpace) {
-    const pose = frame.getPose(xrAnchor.anchorSpace, refSpace);
-    if (!pose) { anchorNode.visible = false; cancelInput('anchor tracking unavailable'); }
-    if (pose) {
-      anchorNode.visible = true;
-      const p = pose.transform.position, o = pose.transform.orientation;
-      anchorNode.position.set(p.x, p.y, p.z);
-      anchorNode.quaternion.set(o.x, o.y, o.z, o.w);
-      _v.set(0, 0, -1).applyQuaternion(anchorNode.quaternion);
-      anchorYaw = Math.atan2(-_v.x, -_v.z);
-      if (!roomAnchored) {
-        roomAnchored = true;
-        anchorNode.visible = true;
-        if (restorePending) {
-          restorePending = false;
-          L('anchor', 'restored anchor localized');
-          say('Layout restored to the room.');
-        }
-        hud.refresh();
-      }
-    }
-  }
+  if (xrTracking && frame && xrAnchor && refSpace) updateRoomAnchor(frame, refSpace);
 
   // hit-test reticle (visible while placing, or before the room is anchored —
   // but not while a persisted-anchor restore is still pending)
@@ -1017,6 +1072,7 @@ function animate(time, frame) {
       gamepads: Array.from(renderer.xr.getSession()?.inputSources || [], s => ({ hand: s.handedness, axes: s.gamepad?.axes, buttons: s.gamepad?.buttons.map(b => ({ pressed: b.pressed, value: b.value })) })) });
   }
   if (!renderer.xr.isPresenting) controls.update();
+  reportPlacement();
   renderer.render(scene, camera);
 }
 renderer.setAnimationLoop(animate);
@@ -1034,8 +1090,8 @@ L('ready', { items: items.length });
 // Debug hooks expose the real implementation for console use and regressions.
 window.__placer = { items, library, get selected() { return selected; }, keys, renderer, camera, controllers, anchorNode,
   placeItem, selectItem, onSqueeze, onTrigger, processPlacement, makeRoomAnchor, beginRestore, invalidateAnchors,
-  cancelInput, importLayout, validateLayout, layoutSnapshot, saveNow, grab, pinch, animate, handleGamepads, handleKeys, setupHitTest,
-  get state() { return { xrAnchor, anchorGeneration, persistedAnchorUUID, restorePending, roomAnchored, pendingPlacement, hitTestSource }; },
+  cancelInput, importLayout, validateLayout, layoutSnapshot, saveNow, grab, pinch, animate, handleGamepads, handleKeys, setupHitTest, updateRoomAnchor, reportPlacement,
+  get state() { return { xrAnchor, anchorGeneration, persistedAnchorUUID, restorePending, roomAnchored, pendingPlacement, hitTestSource, placing }; },
   configureTest(values) { if (!params.has('test')) throw new Error('Test mode required');
     if ('lastHitPose' in values) lastHitPose = values.lastHitPose;
     if ('placing' in values) placing = values.placing;
@@ -1045,5 +1101,7 @@ window.__placer = { items, library, get selected() { return selected; }, keys, r
     if ('xrTracking' in values) xrTracking = values.xrTracking;
     if ('trackedSources' in values) trackedSources = values.trackedSources;
     if ('hitTestSource' in values) hitTestSource = values.hitTestSource;
+    if ('placementDeadline' in values) placementDeadline = values.placementDeadline;
   }
 };
+

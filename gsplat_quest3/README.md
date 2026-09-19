@@ -75,7 +75,7 @@ node tests/smoke.mjs
 
 The runner needs Node 22+, installed Chrome (`CHROME_PATH` can override its path), and CDN access. It starts an isolated server and browser profile. It loads a real bundled SOG with Spark and tests layout preservation, active-frame anchor creation, late async results, pinch saving, input cancellation, byte-range serving, durable log sync, offline recovery, and failed startup recording. Screenshots go to `.test-output/`. Temporary profiles and log directories are retained under the OS temp directory for inspection.
 
-The latest automated run passed **63 checks**. These checks use synthetic XR objects for lifecycle tests; they do not certify real Quest tracking, stereo rendering, permissions, anchor localization, or frame rate. See [REVIEW.md](REVIEW.md) for the critic review and remaining hardware checks.
+The latest automated run passed **72 checks**. These checks use synthetic XR objects for lifecycle tests; they do not certify real Quest tracking, stereo rendering, permissions, anchor localization, or frame rate. See [REVIEW.md](REVIEW.md) for the critic review and remaining hardware checks.
 
 ## Files
 
@@ -84,4 +84,15 @@ The latest automated run passed **63 checks**. These checks use synthetic XR obj
 
 
 Placement visibility: a newly created room anchor can take time to produce a pose. The chosen hit-test position stays visible for up to three seconds while waiting; if the anchor never localizes, the app keeps that fixed session position and detaches the persistent handle. A previously tracked anchor still hides the layout on tracking loss. Status distinguishes loading, waiting for geometry, hidden tracking, and loaded at marker; loaded data is not proof of visible splat pixels. The selection box is drawn over depth occlusion so a visible box with missing splats points to a rendering/depth problem. For that case, disable Real-world occlusion before re-entering AR and download the recording.
+
+
+## AR splat visibility and selection — 2026-09-15
+
+Depth occlusion is now **off by default**: the app omits the optional depth request and Spark ignores the depth buffer. This keeps physical-depth occlusion from hiding splats while diagnosing AR visibility. It also means objects will be visible through real furniture/walls. Enable Depth occlusion before AR entry to request sensor access. Press the **right thumbstick inward** to switch splat depth testing on/off live; if depth was not requested at entry, the HUD explains that enabling sensor access requires re-entry.
+
+The headset HUD again shows the current asset name and index. In placement mode (**A/X**), move either thumbstick left/right to choose a splat and trigger at the ring to place it. Previous splat / Next splat buttons and clickable library rows work on desktop. The HUD follows the left controller, or the tracked right controller when the left is unavailable.
+
+Spark 2.1.0 generation and asynchronous sort readback now explicitly flush GPU commands. The HUD's Queued count is Spark's active splat count, not a count of visible pixels. Five-second splat.render_diagnostics events include loaded/queued/instanced counts, sorting state, render sizes, depth state, and both eye projections. Zero queued splats suggests loading/LOD/sorting; a nonzero queue with no visible splats points toward rendering/camera/depth.
+
+The 72-check suite now includes **real Spark GPU pixel checks through a synthetic stereo XR camera**: both eyes draw splats, an opaque depth surface hides them, and depth bypass restores them without replacing the asset. It also tests desktop and thumbstick asset selection and the live depth switch. This is stronger than the prior load/placement checks, but does not validate the Quest driver or its depth texture. Depth remains experimental. See [Spark renderer options](https://sparkjs.dev/docs/spark-renderer/) and the pinned [Three.js depth implementation](https://github.com/mrdoob/three.js/blob/r180/src/renderers/webxr/WebXRDepthSensing.js).
 

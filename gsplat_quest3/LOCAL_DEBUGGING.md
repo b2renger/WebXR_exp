@@ -158,7 +158,7 @@ For a reproducible headset report: start a new page, add a marker describing the
 node tests/smoke.mjs
 ```
 
-The harness uses real Three/Spark CDN modules and a bundled SOG, synthetic XR lifecycle objects, a real local server and an isolated headless Chrome profile. It checks 63 assertions including corrupt-import preservation, late anchors, pinch saves, load-outage preservation, byte ranges, persistent logging, Unicode limits, offline recovery and blocked-CDN startup. Screenshots are under `.test-output/`. `CHROME_PATH` overrides the Chrome executable; Node 22+ is required for built-in WebSocket. It does not need the manually launched development server.
+The harness uses real Three/Spark CDN modules and a bundled SOG, synthetic XR lifecycle objects, a real local server and an isolated headless Chrome profile. It checks 72 assertions including corrupt-import preservation, late anchors, pinch saves, load-outage preservation, byte ranges, persistent logging, Unicode limits, offline recovery and blocked-CDN startup. Screenshots are under `.test-output/`. `CHROME_PATH` overrides the Chrome executable; Node 22+ is required for built-in WebSocket. It does not need the manually launched development server.
 
 Reference: [WebXR anchor creation](https://immersive-web.github.io/anchors/#dom-xrframe-createanchor) requires an active frame; placement is therefore queued and revalidated in the animation callback. See [REVIEW.md](REVIEW.md) for review status and hardware limits.
 
@@ -169,4 +169,9 @@ Desktop: select a library row, click Place selected asset, then click the ground
 
 
 Placement visibility: a newly created room anchor can take time to produce a pose. The chosen hit-test position stays visible for up to three seconds while waiting; if the anchor never localizes, the app keeps that fixed session position and detaches the persistent handle. A previously tracked anchor still hides the layout on tracking loss. Status distinguishes loading, waiting for geometry, hidden tracking, and loaded at marker; loaded data is not proof of visible splat pixels. The selection box is drawn over depth occlusion so a visible box with missing splats points to a rendering/depth problem. For that case, disable Real-world occlusion before re-entering AR and download the recording.
+
+
+## Invisible AR splats — visibility mode
+
+Reload and enter AR with Depth occlusion **unchecked** (the new default). Choose the asset shown at the top of the headset HUD: A/X enters placement; stick left/right cycles splats. Right thumbstick click toggles depth testing live. The HUD's Queued count is the number of splats prepared by Spark, not verified visible pixels. If a box remains visible without splats in this mode, download the session: inspect splat.render_diagnostics for activeSplats, instanceCount, sorting, depthTest, depthAvailable and the two eye projection matrices. Sensor depth can only be enabled after it was requested at entry. GPU sorting now explicitly flushes queued work; this is still subject to real-device verification. Screenshots include headset-hud.png and placed-asset.png. The new stereo pixel regression uses a synthetic foreground depth surface, not Quest sensor data.
 

@@ -54,8 +54,20 @@ function resetDesktopCamera() {
 // LOD-aware Spark renderer. Budget defaults are platform-aware (500-750K splats
 // in WebXR, 2.5M desktop); the cone foveation defaults spend the budget where
 // the user is looking — same philosophy as PlayCanvas's gsplat budget balancer.
-const spark = new SparkRenderer({ renderer, enableLod: true });
+const spark = new SparkRenderer({ renderer, enableLod: true, depthTest: false });
+// Spark 2.1.0 submits generation/readback outside the XR animation callback.
+// Explicit flushes prevent fence-based sorting from waiting for a later frame.
+spark.flushAfterGenerate = true;
+spark.flushAfterRead = true;
 scene.add(spark);
+function setOcclusion(enabled) {
+  spark.material.depthTest = enabled;
+  document.getElementById('occl').checked = enabled;
+  L('occlusion', { enabled, presenting: renderer.xr.isPresenting, depthAvailable: renderer.xr.hasDepthSensing() });
+  if (renderer.xr.isPresenting) say(enabled ? (renderer.xr.hasDepthSensing() ? 'Depth occlusion ON' : 'Depth requested: exit and re-enter AR.') : 'Depth OFF: splats ignore occlusion.');
+  hud.refresh();
+}
+document.getElementById('occl').addEventListener('change', e => setOcclusion(e.target.checked));
 
 const grid = new THREE.GridHelper(8, 16, 0x3b4a5e, 0x212a35);
 grid.material.transparent = true; grid.material.opacity = 0.55;
@@ -110,6 +122,15 @@ function renderLibrary() {
     el.appendChild(row);
   });
 }
+function cycleAsset(direction) {
+  if (!library.length) return;
+  currentAsset = (currentAsset + direction + library.length) % library.length;
+  renderLibrary();
+  L('asset_selected', { index: currentAsset, name: library[currentAsset].name });
+  hud.refresh();
+}
+document.getElementById('b-prevasset').onclick = () => cycleAsset(-1);
+document.getElementById('b-nextasset').onclick = () => cycleAsset(1);
 
 addAsset('./splat_heron.sog', 'splat_heron.sog');
 addAsset('./splat.sog', 'splat.sog');
@@ -369,11 +390,11 @@ document.getElementById('importpick').onchange = async (e) => {
 // above the left controller showing mode + current asset.
 // ---------------------------------------------------------------------------
 const hud = (() => {
-  const cv = document.createElement('canvas'); cv.width = 512; cv.height = 96;
+  const cv = document.createElement('canvas'); cv.width = 768; cv.height = 216;
   const ctx = cv.getContext('2d');
   const tex = new THREE.CanvasTexture(cv);
   const mesh = new THREE.Mesh(
-    new THREE.PlaneGeometry(0.16, 0.03),
+    new THREE.PlaneGeometry(0.24, 0.0675),
     new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthTest: false }));
   mesh.renderOrder = 1000;
   mesh.position.set(0, 0.04, -0.06);
@@ -381,17 +402,20 @@ const hud = (() => {
   let lastMsg = '';
   function draw() { try { drawInner(); } catch (e) {} }   // resilient to early calls
   function drawInner() {
-    ctx.clearRect(0, 0, 512, 96);
+    ctx.clearRect(0, 0, 768, 216);
     ctx.fillStyle = 'rgba(10,14,20,0.72)';
-    if (ctx.roundRect) { ctx.beginPath(); ctx.roundRect(0, 0, 512, 96, 20); ctx.fill(); }
-    else ctx.fillRect(0, 0, 512, 96);
+    if (ctx.roundRect) { ctx.beginPath(); ctx.roundRect(0, 0, 768, 216, 20); ctx.fill(); }
+    else ctx.fillRect(0, 0, 768, 216);
     ctx.fillStyle = '#cfe3ff'; ctx.font = '600 30px sans-serif';
-    ctx.fillText(lastMsg.slice(0, 34), 18, 40);
+    ctx.fillText(`${currentAsset + 1}/${library.length}  ${library[currentAsset]?.name || 'No asset'}`.slice(0, 42), 18, 40);
     ctx.fillStyle = '#8fa2b8'; ctx.font = '24px sans-serif';
-    ctx.fillText(placing ? 'Aim HEAD at floor · trigger at ring' : 'A place · B delete · grip drag', 18, 76);
+    ctx.fillText(lastMsg.slice(0, 51), 18, 78);
+    ctx.fillText(placing ? 'Stick left/right: choose splat | Trigger: place at ring' : 'A/X: place | B/Y: delete | Grip: drag', 18, 118);
+    ctx.fillText(`Right stick CLICK: depth ${spark.material.depthTest ? 'ON' : 'OFF'} | Queued: ${spark.activeSplats}`, 18, 158);
+    ctx.fillText(placing ? 'Aim your HEAD at a surface until the ring appears.' : 'Select an object with the trigger to edit it.', 18, 196);
     tex.needsUpdate = true;
   }
-  return { mesh, set(m) { lastMsg = m; draw(); }, refresh: draw };
+  return { mesh, canvas: cv, set(m) { lastMsg = m; draw(); }, refresh: draw };
 })();
 
 // ---------------------------------------------------------------------------
@@ -852,7 +876,7 @@ function handleGamepads(dt) {
     if (placing) {
       // while placing: either stick left/right cycles the asset
       if (Math.abs(sx) > 0.6 && assetCycleCooldown === 0 && library.length > 1) {
-        currentAsset = (currentAsset + (sx > 0 ? 1 : library.length - 1)) % library.length;
+        cycleAsset(sx > 0 ? 1 : -1);
         assetCycleCooldown = 0.35;
         renderLibrary(); hud.refresh();
       }
@@ -864,6 +888,7 @@ function handleGamepads(dt) {
 
     const prev = prevButtons.get(src) || [];
     const pressed = gp.buttons.map((b) => b.pressed);
+    if (src.handedness === 'right' && pressed[3] && !prev[3]) setOcclusion(!spark.material.depthTest);
     pressed.forEach((down, index) => { if (down !== Boolean(prev[index])) L('gamepad_button', { hand: src.handedness, index, down }); });
     if (pressed[4] && !prev[4]) {          // A / X: enter placing mode
       placing = !placing;
@@ -998,6 +1023,8 @@ function animate(time, frame) {
 
     const session = renderer.xr.getSession();
     xrTracking = Boolean(frame && refSpace && frame.getViewerPose(refSpace) && session.visibilityState === 'visible');
+    const hudController = controllers.find(c => c.visible && c.userData.handedness === 'left') || controllers.find(c => c.visible);
+    if (hudController && hud.mesh.parent !== hudController) hudController.add(hud.mesh);
     trackedSources = new Set(xrTracking ? Array.from(session.inputSources).filter(src => frame.getPose(src.targetRaySpace, refSpace)) : []);
     if (!xrTracking) { cancelInput('tracking unavailable'); anchorNode.visible = false; }
     else if (roomAnchored && !xrAnchor) anchorNode.visible = true;
@@ -1012,6 +1039,12 @@ function animate(time, frame) {
 
     hb.frames++;
     if (time - hb.last > 5000) {
+      L('render_diagnostics', { loadedSplats: items.map(i => ({ id:i.id, name:i.asset.name, loaded:i.loaded, fitted:i._fitted, count:i.splat.numSplats })),
+        activeSplats: spark.activeSplats, instanceCount: spark.geometry.instanceCount, sorting: spark.sorting, sortDirty: spark.sortDirty,
+        drawingBuffer: renderer.getDrawingBufferSize(new THREE.Vector2()).toArray(), renderSize: spark.renderSize.toArray(), lod: spark.enableLod, depthTest: spark.material.depthTest,
+        depthAvailable: renderer.xr.hasDepthSensing(), anchorVisible: anchorNode.visible,
+        eyes: xrCam.cameras.map(c => ({ near:c.near, far:String(c.far), projection:c.projectionMatrix.toArray(), position:c.position.toArray() })) });
+      hud.refresh();
       if (hb.last) L('hb', 'fps=' + (hb.frames / ((time - hb.last) / 1000)).toFixed(1),
         'items=' + items.length, 'anchored=' + roomAnchored, 'placing=' + placing,
         'splats=' + items.map((i) => i.splat.numSplats || 0).join('/'));
@@ -1088,10 +1121,10 @@ renderer.domElement.addEventListener('webglcontextrestored', () => L('webgl_cont
 document.body.dataset.ready = 'true';
 L('ready', { items: items.length });
 // Debug hooks expose the real implementation for console use and regressions.
-window.__placer = { items, library, get selected() { return selected; }, keys, renderer, camera, controllers, anchorNode,
+window.__placer = { items, library, get selected() { return selected; }, keys, renderer, camera, controllers, anchorNode, spark, scene, hud, setOcclusion, cycleAsset,
   placeItem, selectItem, onSqueeze, onTrigger, processPlacement, makeRoomAnchor, beginRestore, invalidateAnchors,
   cancelInput, importLayout, validateLayout, layoutSnapshot, saveNow, grab, pinch, animate, handleGamepads, handleKeys, setupHitTest, updateRoomAnchor, reportPlacement,
-  get state() { return { xrAnchor, anchorGeneration, persistedAnchorUUID, restorePending, roomAnchored, pendingPlacement, hitTestSource, placing }; },
+  get state() { return { xrAnchor, anchorGeneration, persistedAnchorUUID, restorePending, roomAnchored, pendingPlacement, hitTestSource, placing, currentAsset }; },
   configureTest(values) { if (!params.has('test')) throw new Error('Test mode required');
     if ('lastHitPose' in values) lastHitPose = values.lastHitPose;
     if ('placing' in values) placing = values.placing;
@@ -1104,4 +1137,5 @@ window.__placer = { items, library, get selected() { return selected; }, keys, r
     if ('placementDeadline' in values) placementDeadline = values.placementDeadline;
   }
 };
+
 

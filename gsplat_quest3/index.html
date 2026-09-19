@@ -91,6 +91,7 @@
 
   <div class="sect">Library (place next)</div>
   <div id="library"></div>
+  <div style="display:flex;gap:6px;margin-top:6px"><button id="b-prevasset">Previous splat</button><button id="b-nextasset">Next splat</button></div>
   <div id="addrow">
     <input type="text" id="url-in" placeholder="https://…/scene.sog | .rad | .spz | .ply">
     <button id="b-addurl" type="button">Add</button>
@@ -107,7 +108,7 @@
     <button id="b-import"  type="button">Import</button>
     <input type="file" id="importpick" accept=".json" style="display:none">
   </div>
-  <label class="chk"><input type="checkbox" id="occl" checked> Real-world occlusion (depth sensing, applies on AR entry)</label>
+  <label class="chk"><input type="checkbox" id="occl"> Depth occlusion (experimental; off keeps splats visible)</label>
   <label class="chk"><input type="checkbox" id="persist-anchor" checked> Persist room anchor across sessions</label>
 
   <details id="logs-panel">

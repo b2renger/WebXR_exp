@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { testXrRendering } from './xr-rendering.js';
 export async function run(app) {
   const results = [];
   const check = (ok, name) => { if (!ok) throw new Error(name); results.push(name); };
@@ -12,6 +13,13 @@ export async function run(app) {
   await pause(750); // Let Spark finish its asynchronous first sort before the visual check.
   app.renderer.render(item.rig.parent.parent, app.camera);
   window.splatPlacementPreview = app.renderer.domElement.toDataURL('image/png');
+  results.push(...await testXrRendering(app));
+  const originalAsset=app.state.currentAsset;
+  document.getElementById('b-nextasset').click();
+  check(app.state.currentAsset===(originalAsset+1)%app.library.length, 'Next splat control changes the selected library asset');
+  document.getElementById('b-prevasset').click();
+  check(app.state.currentAsset===originalAsset, 'Previous splat control restores the selection');
+  window.splatHudPreview=app.hud.canvas.toDataURL('image/png');
   item.rig.position.x = 1.23; app.saveNow();
   const before = localStorage.getItem(storeKey), beforeItem = app.items[0];
   for (const text of ['{bad', JSON.stringify({version:2, items:[{id:'bad',src:'javascript:alert(1)',pos:[0,0,0],yaw:0,scale:1,name:'bad'}]}), JSON.stringify({version:2, items:[{...item.toJSON(),scale:-1}]})]) {
@@ -86,6 +94,10 @@ export async function run(app) {
     app.configureTest({xrTracking:true});
     const stick={handedness:'left',gamepad:{axes:[0,0,0,-1],buttons:[]}};
     session.inputSources=[stick];app.configureTest({trackedSources:new Set([stick]),roomAnchored:true});
+    app.configureTest({placing:true});stick.gamepad.axes=[0,0,1,0];
+    const assetBeforeStick=app.state.currentAsset;app.handleGamepads(0.5);
+    check(app.state.currentAsset===(assetBeforeStick+1)%app.library.length, 'Headset thumbstick selects another splat in placement mode');
+    app.cycleAsset(-1);app.configureTest({placing:false});stick.gamepad.axes=[0,0,0,-1];
     for (const [headYaw,roomYaw] of [[0,0],[Math.PI/2,0],[0,Math.PI/2],[Math.PI/2,Math.PI/2]]) {
       app.camera.quaternion.setFromAxisAngle(new THREE.Vector3(0,1,0),headYaw);
       app.anchorNode.quaternion.setFromAxisAngle(new THREE.Vector3(0,1,0),roomYaw);
@@ -95,6 +107,15 @@ export async function run(app) {
       check(actual.distanceTo(expected)<1e-6, 'Forward thumbstick follows head direction with head/anchor yaw '+headYaw+'/'+roomYaw);
     }
     app.camera.quaternion.identity();app.anchorNode.quaternion.identity();
+    const depthStick={handedness:'right',gamepad:{axes:[0,0,0,0],buttons:[{pressed:false},{pressed:false},{pressed:false},{pressed:true}]}};
+    session.inputSources=[depthStick];app.configureTest({trackedSources:new Set([depthStick])});
+    app.handleGamepads(0.1);
+    check(app.spark.material.depthTest, 'Right thumbstick click enables depth testing without reloading the asset');
+    app.handleGamepads(0.1);
+    check(app.spark.material.depthTest, 'Holding the depth toggle does not repeatedly switch modes');
+    depthStick.gamepad.buttons[3].pressed=false;app.handleGamepads(0.1);
+    depthStick.gamepad.buttons[3].pressed=true;app.handleGamepads(0.1);
+    check(!app.spark.material.depthTest, 'Second thumbstick click disables depth testing in the same session');
     let resolveOld;
     const oldSession={requestReferenceSpace:async()=>({}),requestHitTestSource:()=>new Promise(r=>resolveOld=r)};
     session=oldSession;const oldSetup=app.setupHitTest(oldSession);await pause(0);

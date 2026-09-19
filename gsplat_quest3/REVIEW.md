@@ -43,3 +43,8 @@ Added an explicit Place button and a real browser click-path regression. Fixed s
 
 Removed the load-complete Placed message, added per-item geometry/anchor status, made the selection marker visible over depth, and preserved the hit-test position while a newly created anchor waits for its first pose. A three-second timeout switches to a fixed session pose; previously localized anchors still hide on tracking loss and recover normally. Five new regressions cover these cases (63 checks total). This reproduces a code path consistent with the reported symptom, not a confirmed diagnosis from Quest recordings; no hardware test or new critic review was performed.
 
+
+## AR renderer and asset selection follow-up — 2026-09-15
+
+Visible bounds with invisible splats shifted investigation to the renderer. Added default depth bypass (sensor request off), live right-stick depth switching, explicit GPU generation/readback flushes, render-queue diagnostics, restored asset names/cycling hints and desktop Previous/Next buttons. A new actual-Spark stereo pixel test waits for generation/sorting to settle before freezing the scene; it verifies both eye images, depth-induced hiding and restoration without changing the asset. Full suite: 72 checks including input selection/toggle regressions. The specific Quest depth/driver behavior has not been reproduced on hardware, so this is a tested visibility path and diagnostic improvement, not certification of a physical Quest fix. No new critic review was performed.
+

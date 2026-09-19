@@ -72,7 +72,7 @@ try {
   await send('Input.dispatchMouseEvent', {type:'mouseReleased',x:groundClick.x,y:groundClick.y,button:'left',clickCount:1});
   if (!await evaluate('__placer.items.length === 1')) throw new Error('Place button and real canvas click did not create an asset');
   console.log('PASS Place button plus real desktop click creates the selected asset');
-  const results = await evaluate('import("./tests/regression.js").then(m => m.run(window.__placer))');
+  const results = await evaluate('import("./tests/regression.js").then(m => m.run(window.__placer))').catch(error => { throw new Error(error.message + '\nBrowser errors: ' + errors.join('\n')); });
   results.forEach(result => console.log('PASS ' + result));
   await new Promise(resolve => setTimeout(resolve, 500));
   if (errors.some(e => !e.includes('SPATIAL_LOG_TEST_'))) throw new Error(errors.join('\n'));
@@ -83,6 +83,8 @@ try {
   const screenshot = await send('Page.captureScreenshot', { format: 'png' });
   const outputDirectory = fileURLToPath(new URL('../.test-output/', import.meta.url));
   await mkdir(outputDirectory, { recursive: true });
+  const hudPreview = await evaluate('window.splatHudPreview');
+  await writeFile(path.join(outputDirectory, 'headset-hud.png'), Buffer.from(hudPreview.split(',')[1], 'base64'));
   const placementPreview = await evaluate('window.splatPlacementPreview');
   await writeFile(path.join(outputDirectory, 'placed-asset.png'), Buffer.from(placementPreview.split(',')[1], 'base64'));
   const screenshotPath = path.join(outputDirectory, 'desktop.png');

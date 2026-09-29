@@ -67,6 +67,7 @@ try {
   if (!ready) throw new Error('App did not start: ' + await evaluate('document.getElementById("status")?.textContent') + '\n' + errors.join('\n'));
   console.log('App loaded with real CDN dependencies. Running geometry, physics, and UI regressions…');
   const results = await evaluate('import("./tests/regression.js").then(m => m.run(window.spatialLab))');
+  results.push(...await evaluate('import("./tests/xr-lifecycle.js").then(m => m.run(window.spatialLab))'));
   results.forEach(result => console.log('PASS ' + result));
   await new Promise(resolve => setTimeout(resolve, 500));
   if (errors.length) throw new Error(errors.join('\n'));

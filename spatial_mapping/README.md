@@ -222,3 +222,14 @@ Independent critic review: see [REVIEW.md](REVIEW.md) for findings, fixes and th
 
 Menu interaction: point a controller (or supported hand-selection ray) at a control to highlight it. Press the trigger to cycle its value or run its action; the label updates immediately. Release before pressing again. Each controller has independent hover feedback. Pointing away, tracking loss, and leaving AR clear highlights. Panel padding consumes the press so it cannot launch a ball. Hover transitions are recorded as xr.menu_hover.
 
+
+
+## Session lifecycle and tracking recovery (September 2026)
+
+Controllers are reconciled from the current session's input sources on entry and every XR frame, including hand/controller replacement. Rays use current target-ray poses in the same reference space as the room. They no longer depend on Three's cached controller connection events.
+
+Removing the headset, opening a system overlay, or losing positional tracking immediately cancels held interactions. Content is hidden and any remaining XR frames are cleared to passthrough. Returning to visible is insufficient: a fresh, non-emulated viewer pose is required. Release buttons, triggers and thumbsticks once after recovery before using them. Open pinched fingers once after recovery too. The menu is placed in front of the recovered viewer; room geometry is never attached to the viewer.
+
+Plane/mesh rendering and collisions require finite, non-emulated surface poses. A reference-space reset discards geometry and balls from the previous coordinate system, then acquires fresh room poses.
+
+Session entry is serialized. Exit removes session/reference listeners and restores the desktop camera pose, projection, canvas size and controls. Late initialization results cannot revive an ended session. See [the headset lifecycle test sequence](LOCAL_DEBUGGING.md#headset-lifecycle-test-sequence) for hardware validation.

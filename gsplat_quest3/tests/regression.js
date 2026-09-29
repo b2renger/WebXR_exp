@@ -53,7 +53,7 @@ export async function run(app) {
     app.updateRoomAnchor({getPose:()=>null},{},Infinity);
     check(app.anchorNode.visible && !app.state.xrAnchor && !app.state.persistedAnchorUUID, 'Unlocalized new anchor falls back to the chosen position without an obsolete handle');
     await app.makeRoomAnchor(new THREE.Vector3(),0,{createAnchor:async()=>({anchorSpace:{},delete(){}})});
-    const localizedFrame={getPose:()=>({transform:{position:{x:0,y:0,z:-1},orientation:{x:0,y:0,z:0,w:1}}})};
+    const localizedFrame={getPose:()=>({transform:{matrix:new THREE.Matrix4().makeTranslation(0,0,-1).elements,position:{x:0,y:0,z:-1},orientation:{x:0,y:0,z:0,w:1}}})};
     app.updateRoomAnchor(localizedFrame,{});app.updateRoomAnchor({getPose:()=>null},{});
     check(!app.anchorNode.visible,'Previously localized anchor hides the layout when tracking is lost');
     app.reportPlacement();
@@ -125,7 +125,7 @@ export async function run(app) {
     const oldSource={cancel(){this.cancelled=true;}};resolveOld(oldSource);await oldSetup;
     check(oldSource.cancelled && !newSource.cancelled && app.state.hitTestSource===newSource, 'Late hit-test source from old session cannot replace the active source');
     newSource.cancel();app.configureTest({hitTestSource:null});
-    app.configureTest({roomAnchored:true});app.anchorNode.visible=true;app.selectItem(item);
+    session.visibilityState='visible';app.configureTest({roomAnchored:true});app.anchorNode.visible=true;app.selectItem(item);
     left.position.set(-0.2,0,0);right.position.set(0.2,0,0);
     app.onSqueeze(left,true);app.onSqueeze(right,true);
     check(app.pinch.active,'Two grips begin a pinch');

@@ -73,6 +73,7 @@ try {
   if (!await evaluate('__placer.items.length === 1')) throw new Error('Place button and real canvas click did not create an asset');
   console.log('PASS Place button plus real desktop click creates the selected asset');
   const results = await evaluate('import("./tests/regression.js").then(m => m.run(window.__placer))').catch(error => { throw new Error(error.message + '\nBrowser errors: ' + errors.join('\n')); });
+  results.push(...await evaluate('import("./tests/xr-lifecycle.js").then(m => m.run(window.__placer))'));
   results.forEach(result => console.log('PASS ' + result));
   await new Promise(resolve => setTimeout(resolve, 500));
   if (errors.some(e => !e.includes('SPATIAL_LOG_TEST_'))) throw new Error(errors.join('\n'));

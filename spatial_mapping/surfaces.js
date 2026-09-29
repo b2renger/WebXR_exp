@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { localizedPose } from './xr-session.js';
 import { tearGLSL, maskMaterial } from './tear.js';
 
 // WebXR plane polygons lie in the local XZ plane. Earcut handles concave outlines.
@@ -131,6 +132,7 @@ export class Surfaces {
   }
   pose(record, matrix) {
     if (record.localized !== Boolean(matrix)) globalThis.SpatialLog?.record('surface.tracking', { label: record.label, localized: Boolean(matrix) });
+    if (matrix && (matrix.length !== 16 || !Array.from(matrix).every(Number.isFinite))) matrix = null;
     record.group.visible = Boolean(matrix);
     record.localized = Boolean(matrix);
     record.collider.setEnabled(Boolean(matrix));
@@ -163,7 +165,7 @@ export class Surfaces {
     const poses = new Map();
     if (meshes) for (const mesh of meshes) {
       const pose = frame.getPose(mesh.meshSpace, referenceSpace);
-      if (pose && mesh.indices.length) poses.set(mesh, pose);
+      if (localizedPose(pose) && mesh.indices.length) poses.set(mesh, pose);
     }
     // Keep mesh records during temporary tracking loss if no plane fallback exists.
     // Their render/collision state is disabled below, while the last pose survives export.
@@ -178,7 +180,10 @@ export class Surfaces {
         const data = useMeshes ? { vertices: item.vertices, indices: item.indices } : planeGeometry(item.polygon);
         record = this.add(item, data, item.semanticLabel || (useMeshes ? 'mesh' : 'plane'), item.lastChangedTime);
       }
-      if (record) this.pose(record, (useMeshes ? poses.get(item) : frame.getPose(item.planeSpace, referenceSpace))?.transform.matrix);
+      if (record) {
+        const pose = useMeshes ? poses.get(item) : frame.getPose(item.planeSpace, referenceSpace);
+        this.pose(record, localizedPose(pose) ? pose.transform.matrix : null);
+      }
     }
     return { meshes: meshes?.size ?? null, planes: planes?.size ?? null };
   }

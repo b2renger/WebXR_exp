@@ -1,5 +1,6 @@
 ﻿
 import * as THREE from 'three';
+import { XRSessionState, localizedPose } from './xr-session.js';
 import { SparkRenderer, SplatMesh } from '@sparkjsdev/spark';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
@@ -426,7 +427,7 @@ const arBtn = document.createElement('button');
 arBtn.type = 'button'; arBtn.className = 'primary';
 arBtn.textContent = 'Checking AR support…'; arBtn.disabled = true;
 document.getElementById('ar-btn-slot').appendChild(arBtn);
-let arSession = null, startingAR = false;
+let arSession = null, startingAR = false, savedDesktop = null;
 let requestAttempt = 0;
 
 function arInit(withFloor, withDepth) {
@@ -458,7 +459,12 @@ if (navigator.xr) {
 
 arBtn.onclick = async () => {
   if (startingAR) return;
-  if (arSession) { await arSession.end(); return; }
+  if (arSession) {
+    startingAR = true; arBtn.disabled = true;
+    try { await arSession.end(); } catch (error) { SpatialLog.error('xr.exit_failed', error); say('Could not exit AR: ' + error.message, true); }
+    finally { startingAR = false; arBtn.disabled = false; }
+    return;
+  }
   startingAR = true; arBtn.disabled = true;
   try {
   const wantDepth = document.getElementById('occl').checked;
@@ -481,6 +487,12 @@ arBtn.onclick = async () => {
       break;
     } catch (e) {
       lastErr = e;
+      if (e?.name === 'NotAllowedError' || e?.name === 'AbortError') {
+        requestAttempt = 0;
+        L('xr', 'session request cancelled or denied', e);
+        say('AR entry cancelled or denied. Press Enter AR when ready.', true);
+        return;
+      }
       requestAttempt = e?.name === 'SecurityError' ? i : Math.min(i + 1, ladder.length - 1);
       L('xr', 'attempt', a.label, 'failed:', e);
       if (e && e.name === 'SecurityError') {
@@ -493,14 +505,20 @@ arBtn.onclick = async () => {
 
   requestAttempt = 0;
   arSession = session;
+  savedDesktop = { position: camera.position.clone(), quaternion: camera.quaternion.clone(), target: controls.target.clone(),
+    fov: camera.fov, near: camera.near, far: camera.far, zoom: camera.zoom };
+  xrState.attach(session);
+  controls.enabled = false;
   L('xr', 'enabledFeatures =', session.enabledFeatures ? [...session.enabledFeatures].join(',') : '(n/a)');
   L('xr', 'environmentBlendMode =', session.environmentBlendMode);
-  session.addEventListener('end', () => { arSession = null; arBtn.textContent = 'Enter AR'; });
+
   try {
     await renderer.xr.setSession(session);
+    if (arSession !== session || xrState.session !== session) return;
   } catch (e) {
     console.error('renderer.xr.setSession failed:', e);
-    await session.end().catch(() => {}); arSession = null;
+    await session.end().catch(() => {});
+    if (arSession === session) endExperience();
     say('setSession failed — see Logs.', true);
     return;
   }
@@ -517,7 +535,7 @@ const reticle = new THREE.Mesh(
 reticle.matrixAutoUpdate = false; reticle.visible = false; reticle.renderOrder = 999;
 scene.add(reticle);
 
-let hitTestSource = null;
+let hitTestSource = null, hitTestGeneration = 0;
 let placing = false;          // reticle live; trigger places currentAsset
 let roomAnchored = false;     // anchorNode is pinned to a real pose this session
 let restorePending = false;   // persisted anchor restored, waiting for its first pose
@@ -557,7 +575,7 @@ async function makeRoomAnchor(position, yaw, frame) {
     const q = anchorNode.quaternion;
     const anchor = await frame.createAnchor(new XRRigidTransform(position, q), refSpace);
     if (!live()) { anchor.delete?.(); return; }
-    xrAnchor = anchor; anchorPoseDeadline = performance.now() + 3000; L('anchor', 'created');
+    xrAnchor = anchor; anchorPoseDeadline = xrState.now() + 3000; L('anchor', 'created');
     if (document.getElementById('persist-anchor').checked && anchor.requestPersistentHandle) {
       const uuid = await anchor.requestPersistentHandle();
       if (!live()) { if (uuid !== persistedAnchorUUID) session.deletePersistentAnchor?.(uuid).catch(() => {}); return; }
@@ -570,8 +588,8 @@ async function makeRoomAnchor(position, yaw, frame) {
 function beginRestore(session) {
   invalidateAnchors();
   const generation = anchorGeneration, uuid = persistedAnchorUUID;
-  restorePending = true; restoreDeadline = performance.now() + 8000;
-  const live = () => renderer.xr.getSession() === session && generation === anchorGeneration && restorePending && performance.now() <= restoreDeadline;
+  restorePending = true; restoreDeadline = xrState.now() + 8000;
+  const live = () => renderer.xr.getSession() === session && generation === anchorGeneration && restorePending && xrState.now() <= restoreDeadline;
   session.restorePersistentAnchor(uuid).then(anchor => {
     if (!live()) { anchor.delete?.(); return; }
     xrAnchor = anchor; L('anchor', 'restore accepted', uuid);
@@ -586,16 +604,16 @@ function processPlacement(frame) {
     pendingPlacement = false;
     L('placement_commit', { position: lastHitPose.position.toArray(), asset: library[currentAsset]?.name });
     placeOrAnchorAtHit(frame);
-  } else if (performance.now() >= placementDeadline) {
+  } else if (xrState.now() >= placementDeadline) {
     pendingPlacement = false;
     L('placement_blocked', { reason: 'no_surface_hit', hitTestReady: Boolean(hitTestSource) });
     say('No surface found. Aim your head at the floor until the ring appears, then press trigger again.', true);
   }
 }
-function updateRoomAnchor(frame, refSpace, now = performance.now()) {
+function updateRoomAnchor(frame, refSpace, now = xrState.now()) {
   if (!xrAnchor) return;
   const pose = frame.getPose(xrAnchor.anchorSpace, refSpace);
-  if (!pose) {
+  if (!localizedPose(pose)) {
     if (!anchorHasPose && !restorePending) {
       // A newly created anchor may not have a pose yet. The hit-test position is
       // already valid: don't make the just-loaded object disappear while waiting.
@@ -620,7 +638,8 @@ function updateRoomAnchor(frame, refSpace, now = performance.now()) {
   if (restorePending) { restorePending = false; L('anchor', 'restored anchor localized'); say('Layout restored to the room.'); }
 }
 async function setupHitTest(session) {
-  const live = () => renderer.xr.getSession() === session;
+  const generation = ++hitTestGeneration;
+  const live = () => renderer.xr.getSession() === session && generation === hitTestGeneration;
   const viewerSpace = await session.requestReferenceSpace('viewer');
   if (!live()) return false;
   const source = await session.requestHitTestSource({ space: viewerSpace });
@@ -632,14 +651,13 @@ async function setupHitTest(session) {
 
 renderer.xr.addEventListener('sessionstart', async () => {
   const session = renderer.xr.getSession();
-  const live = () => renderer.xr.getSession() === session;   // guard awaits against session end
+  if (!session || arSession !== session || xrState.session !== session) return;
+  const live = () => renderer.xr.getSession() === session && xrState.session === session; // guard every await
   try {
     L('xr', 'sessionstart');
     cancelInput('session start'); invalidateAnchors();
     camera.position.set(0, 0, 0); camera.quaternion.identity(); camera.updateMatrixWorld(true);
-    session.addEventListener('visibilitychange', () => { L('visibility', session.visibilityState); if (session.visibilityState !== 'visible') cancelInput('XR hidden'); });
-    session.addEventListener('inputsourceschange', e => { L('input_sources', { added: e.added.length, removed: e.removed.length }); if (e.removed.length) cancelInput('source removed'); });
-    renderer.xr.getReferenceSpace()?.addEventListener('reset', () => { cancelInput('reference reset'); invalidateAnchors(); roomAnchored = false; anchorNode.visible = false; });
+    xrState.bindReference(renderer.xr.getReferenceSpace());
     grid.visible = false;
     controls.enabled = false;
     renderer.xr.setFoveation(0.3);
@@ -663,9 +681,8 @@ renderer.xr.addEventListener('sessionstart', async () => {
     } catch (err) {
       if (!live()) return;
       L('xr', 'hit-test unavailable:', err);
-      say('Hit-test unavailable — anchoring 1.5 m ahead.', true);
-      setAnchorPose(new THREE.Vector3(0, 0, -1.5), 0);
-      anchorNode.visible = true;
+      say('Surface detection failed. Exit and re-enter AR to retry.', true);
+      return;
     }
 
     // restore the persisted room anchor without blocking; the frame loop flips
@@ -685,12 +702,18 @@ renderer.xr.addEventListener('sessionstart', async () => {
   }
 });
 
-renderer.xr.addEventListener('sessionend', () => {
+function endExperience() {
+  if (!arSession) return;
+  arSession = null; xrState.detach(); hitTestGeneration++;
+  arBtn.textContent = 'Enter AR';
   L('xr', 'sessionend');
   xrTracking = false; trackedSources.clear();
   cancelInput('session end'); invalidateAnchors();
   hitTestSource?.cancel(); lastHitPose = null;
-  camera.position.set(0, 1.6, 2.2); camera.quaternion.identity(); controls.update();
+  if (savedDesktop) {
+    camera.position.copy(savedDesktop.position); camera.quaternion.copy(savedDesktop.quaternion);
+    controls.target.copy(savedDesktop.target);
+  }
   hitTestSource = null;
   xrAnchor = null;   // keep persistedAnchorUUID: it outlives the session
   grid.visible = true;
@@ -706,18 +729,25 @@ renderer.xr.addEventListener('sessionend', () => {
   // the XR session stomps the user camera's projection (worse with depth
   // sensing, three#29098) — rebuild the desktop projection from one source
   resetDesktopCamera();
+  if (savedDesktop) {
+    for (const key of ['fov','near','far','zoom']) camera[key] = savedDesktop[key];
+    camera.updateProjectionMatrix();
+  }
+  controls.update(); savedDesktop = null;
+  renderer.setPixelRatio(Math.min(devicePixelRatio, 2)); renderer.setSize(innerWidth, innerHeight);
   say('Left AR.');
-});
+}
+renderer.xr.addEventListener('sessionend', endExperience);
 
 // ---------------------------------------------------------------------------
 // Controllers
 // ---------------------------------------------------------------------------
 const controllers = [0, 1].map((i) => {
-  const c = renderer.xr.getController(i);
+  const c = new THREE.Group(); c.visible = false;
   const ray = new THREE.Line(
     new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3(0, 0, -1)]),
     new THREE.LineBasicMaterial({ transparent: true, opacity: 0.5 }));
-  ray.scale.z = 3;
+  ray.scale.z = 3; ray.material.depthTest = false; ray.material.depthWrite = false; ray.renderOrder = 1002;
   c.add(ray);
   c.userData.grabbing = false;
   c.addEventListener('connected', (e) => {
@@ -727,11 +757,31 @@ const controllers = [0, 1].map((i) => {
     if (c.userData.handedness === 'left') c.add(hud.mesh);
   });
   c.addEventListener('disconnected', () => { cancelInput('controller disconnected'); c.userData.source = null; });
-  c.addEventListener('select', () => onTrigger(c));
+  c.addEventListener('trackinglost', () => cancelInput('controller tracking unavailable'));
+  c.addEventListener('selectstart', () => onTrigger(c));
   c.addEventListener('squeezestart', () => onSqueeze(c, true));
   c.addEventListener('squeezeend',   () => onSqueeze(c, false));
   scene.add(c);
   return c;
+});
+
+const xrState = new XRSessionState(controllers, {
+  log: (event, data) => SpatialLog.record('xr.' + event, data),
+  suspend: reason => {
+    xrTracking = false; trackedSources.clear(); cancelInput(reason);
+    anchorNode.visible = false; reticle.visible = false; hud.mesh.visible = false;
+    clock.getDelta();
+  },
+  resume: () => { clock.getDelta(); hud.mesh.visible = true; hud.refresh(); },
+  reset: () => {
+    hitTestGeneration++; hitTestSource?.cancel(); hitTestSource = null;
+    invalidateAnchors(); roomAnchored = false; anchorNode.visible = false;
+    const session = xrState.session;
+    void setupHitTest(session).then(ready => {
+      if (ready) say('Tracking origin changed. Trigger on a surface to re-anchor your layout.');
+    }).catch(error => SpatialLog.error('xr.hit_test_reset_failed', error));
+  },
+  end: ended => { if (arSession === ended) endExperience(); },
 });
 
 function controllerYaw(c) {
@@ -756,7 +806,7 @@ function itemUnderRay(c) {
 
 function onTrigger(c) {
   L('trigger', c.userData.handedness);
-  const blocked = !renderer.xr.isPresenting ? 'not_in_ar' : !xrTracking || !c.visible ? 'tracking_unavailable' : restorePending ? 'restoring_anchor' : null;
+  const blocked = !renderer.xr.isPresenting ? 'not_in_ar' : !xrTracking || renderer.xr.getSession()?.visibilityState !== 'visible' || !c.visible ? 'tracking_unavailable' : restorePending ? 'restoring_anchor' : null;
   if (blocked) {
     L('placement_blocked', { reason: blocked });
     say(blocked === 'restoring_anchor' ? 'Still restoring the room anchor. Wait for the ring before placing.' : 'Tracking unavailable. Look around and keep your controller visible.', true);
@@ -766,7 +816,7 @@ function onTrigger(c) {
   // trigger. While a persisted-anchor restore is pending, re-anchoring is blocked:
   // it would delete the persisted anchor mid-restore.
   if (placing || !roomAnchored) {
-    if (!pendingPlacement) { pendingPlacement = true; placementDeadline = performance.now() + 1000; }
+    if (!pendingPlacement) { pendingPlacement = true; placementDeadline = xrState.now() + 1000; }
     L('placement_requested', { hit: Boolean(lastHitPose), hitTestReady: Boolean(hitTestSource), asset: library[currentAsset]?.name });
     if (!lastHitPose) say('Looking for a surface. Aim your head at the floor, not the controller ray.');
     return;
@@ -812,7 +862,7 @@ function cancelInput(reason) {
 function onSqueeze(c, down) {
   L('squeeze', { handedness: c.userData.handedness, down });
   if (pinch.active) saveLayout();
-  if (down && (!renderer.xr.isPresenting || !xrTracking || !roomAnchored || !anchorNode.visible || !c.visible)) return;
+  if (down && (!renderer.xr.isPresenting || !xrTracking || renderer.xr.getSession()?.visibilityState !== 'visible' || !roomAnchored || !anchorNode.visible || !c.visible)) return;
   if (selected) selected._edited = true;
   c.userData.grabbing = down;
   const held = controllers.filter((x) => x.userData.grabbing);
@@ -866,7 +916,7 @@ function handleGamepads(dt) {
   let move = null, rotate = 0, scale = 0;
 
   for (const src of session.inputSources) {
-    if (!trackedSources.has(src)) continue;
+    if (!trackedSources.has(src) || (xrState.session && !xrState.ready.has(src))) continue;
     const gp = src.gamepad;
     if (!gp) continue;
     const ax = gp.axes;
@@ -983,6 +1033,7 @@ renderer.domElement.addEventListener('pointerdown', (e) => {
 });
 
 addEventListener('resize', () => {
+  if (arSession || renderer.xr.isPresenting) return;
   camera.aspect = innerWidth / innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
@@ -998,10 +1049,16 @@ let hb = { frames: 0, last: 0 };   // heartbeat: fps + state every 5s while pres
 
 function animate(time, frame) {
 
-  const dt = Math.min(clock.getDelta(), 0.1);
+  let dt = Math.min(clock.getDelta(), 0.1);
+  if (arSession && !renderer.xr.isPresenting) return;
   const refSpace = renderer.xr.getReferenceSpace();
 
   if (renderer.xr.isPresenting) {
+    const wasTracked = xrState.tracked;
+    const viewer = xrState.update(frame, refSpace);
+    xrTracking = Boolean(viewer);
+    if (!wasTracked) dt = 0;
+    if (!xrTracking) { renderer.clear(); return; } // Clear stale imagery; skip Spark sorting with an invalid pose.
     // Manual camera update (cameraAutoUpdate=false), then repair the NaN that
     // three's stereo-union projection gets when Quest reports depthFar=Infinity
     // (three#29098) — Spark's sort/LOD and frustum culling read these matrices.
@@ -1021,17 +1078,14 @@ function animate(time, frame) {
       if (!nanFixLogged) { nanFixLogged = true; L('fix', 'repaired NaN depth column in union projection (three#29098)'); }
     }
 
-    const session = renderer.xr.getSession();
-    xrTracking = Boolean(frame && refSpace && frame.getViewerPose(refSpace) && session.visibilityState === 'visible');
     const hudController = controllers.find(c => c.visible && c.userData.handedness === 'left') || controllers.find(c => c.visible);
     if (hudController && hud.mesh.parent !== hudController) hudController.add(hud.mesh);
-    trackedSources = new Set(xrTracking ? Array.from(session.inputSources).filter(src => frame.getPose(src.targetRaySpace, refSpace)) : []);
-    if (!xrTracking) { cancelInput('tracking unavailable'); anchorNode.visible = false; }
-    else if (roomAnchored && !xrAnchor) anchorNode.visible = true;
+    trackedSources = new Set(controllers.filter(c => c.visible).map(c => c.userData.source));
+    if (roomAnchored && !xrAnchor) anchorNode.visible = true;
     if ((grab.active || pinch.active) && controllers.some(c => c.userData.grabbing && (!c.visible || !c.userData.source || !frame.getPose(c.userData.source.targetRaySpace, refSpace)))) cancelInput('controller tracking unavailable');
 
     // persisted-anchor restore that never localizes: stop waiting at the deadline
-    if (restorePending && !roomAnchored && performance.now() > restoreDeadline) {
+    if (restorePending && !roomAnchored && xrState.now() > restoreDeadline) {
       invalidateAnchors();
       L('anchor', 'restored anchor never localized within 8s');
       say('Saved anchor not found here — trigger on a surface to re-anchor.');
@@ -1062,7 +1116,7 @@ function animate(time, frame) {
     const hits = frame.getHitTestResults(hitTestSource);
     if (hits.length && wantReticle) {
       const pose = hits[0].getPose(refSpace);
-      if (pose) {
+      if (localizedPose(pose)) {
         reticle.matrix.fromArray(pose.transform.matrix);
         const p = pose.transform.position;
         camera.getWorldPosition(_v);
@@ -1104,7 +1158,10 @@ function animate(time, frame) {
       controllers: controllers.map(c => ({ hand: c.userData.handedness, visible: c.visible, position: c.position.toArray(), orientation: c.quaternion.toArray(), grabbing: c.userData.grabbing })),
       gamepads: Array.from(renderer.xr.getSession()?.inputSources || [], s => ({ hand: s.handedness, axes: s.gamepad?.axes, buttons: s.gamepad?.buttons.map(b => ({ pressed: b.pressed, value: b.value })) })) });
   }
-  if (!renderer.xr.isPresenting) controls.update();
+  if (!renderer.xr.isPresenting) {
+    if (arSession) return; // Renderer initialization has not supplied an XR frame yet.
+    xrTracking = false; controls.update();
+  }
   reportPlacement();
   renderer.render(scene, camera);
 }
@@ -1121,7 +1178,7 @@ renderer.domElement.addEventListener('webglcontextrestored', () => L('webgl_cont
 document.body.dataset.ready = 'true';
 L('ready', { items: items.length });
 // Debug hooks expose the real implementation for console use and regressions.
-window.__placer = { items, library, get selected() { return selected; }, keys, renderer, camera, controllers, anchorNode, spark, scene, hud, setOcclusion, cycleAsset,
+window.__placer = { items, library, get selected() { return selected; }, keys, renderer, camera, controllers, anchorNode, spark, scene, hud, xrState, arBtn, controls, endExperience, setOcclusion, cycleAsset,
   placeItem, selectItem, onSqueeze, onTrigger, processPlacement, makeRoomAnchor, beginRestore, invalidateAnchors,
   cancelInput, importLayout, validateLayout, layoutSnapshot, saveNow, grab, pinch, animate, handleGamepads, handleKeys, setupHitTest, updateRoomAnchor, reportPlacement,
   get state() { return { xrAnchor, anchorGeneration, persistedAnchorUUID, restorePending, roomAnchored, pendingPlacement, hitTestSource, placing, currentAsset }; },

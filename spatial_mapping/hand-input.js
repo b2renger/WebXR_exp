@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { localizedPose } from './xr-session.js';
 import { maskMaterial } from './tear.js';
 
 const chains = [
@@ -12,6 +13,7 @@ const up = new THREE.Vector3(0, 1, 0);
 export class HandInput {
   constructor(scene, uniforms) {
     this.pinches = new WeakMap();
+    this.releaseRequired = new WeakSet();
     this.poseTimes = new WeakMap();
     const material = new THREE.MeshBasicMaterial({ color: '#86dfff', transparent: true, depthTest: false, depthWrite: false });
     maskMaterial(material, uniforms);
@@ -24,6 +26,9 @@ export class HandInput {
     }
     this.transform = new THREE.Object3D();
   }
+  reset() {
+    this.pinches = new WeakMap(); this.releaseRequired = new WeakSet(); this.requireNeutral = true; this.hide();
+  }
   hide() { this.joints.visible = false; this.bones.visible = false; }
   sample(frame, referenceSpace, sources, controllers, visible) {
     let jointCount = 0, boneCount = 0;
@@ -34,13 +39,13 @@ export class HandInput {
       const blocked = controller?.userData.menuConsumed;
       if (!source.hand) {
         const pose = frame.getPose(source.gripSpace || source.targetRaySpace, referenceSpace);
-        if (pose) result[source.handedness] = { position: new THREE.Vector3().copy(pose.transform.position), held: Boolean(controller?.userData.held && !blocked) };
+        if (localizedPose(pose)) result[source.handedness] = { position: new THREE.Vector3().copy(pose.transform.position), held: Boolean(controller?.userData.held && !blocked) };
         continue;
       }
       const poses = new Map();
       for (const [name, space] of source.hand) {
         const pose = frame.getJointPose(space, referenceSpace);
-        if (!pose) continue;
+        if (!localizedPose(pose)) continue;
         const position = new THREE.Vector3().copy(pose.transform.position);
         poses.set(name, position);
         if (jointCount < 50) {
@@ -64,11 +69,13 @@ export class HandInput {
         // Hysteresis prevents a noisy fingertip estimate from rapidly releasing.
         const held = thumb.distanceTo(index) < (this.pinches.get(source) ? 0.04 : 0.025);
         if (this.pinches.get(source) !== held) globalThis.SpatialLog?.record('hand.pinch', { handedness: source.handedness, held, gap: thumb.distanceTo(index), menuConsumed: Boolean(blocked) });
+        if (this.requireNeutral && !this.pinches.has(source)) this.releaseRequired.add(source);
+        if (!held) this.releaseRequired.delete(source);
         this.pinches.set(source, held);
-        result[source.handedness] = { position: thumb.clone().add(index).multiplyScalar(0.5), held: held && !blocked };
+        result[source.handedness] = { position: thumb.clone().add(index).multiplyScalar(0.5), held: held && !blocked && !this.releaseRequired.has(source) };
       } else {
         if (this.pinches.has(source)) globalThis.SpatialLog?.record('hand.tracking_lost', { handedness: source.handedness }, 'warn');
-        this.pinches.delete(source);
+        this.pinches.delete(source); this.releaseRequired.add(source);
       }
       if (globalThis.SpatialLog?.motion && performance.now() - (this.poseTimes.get(source) || 0) >= 200) {
         this.poseTimes.set(source, performance.now());

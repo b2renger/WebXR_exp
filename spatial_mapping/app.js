@@ -5,6 +5,7 @@ import { Surfaces, toOBJ } from './surfaces.js';
 import { XRMenu } from './xr-menu.js';
 import { Tear } from './tear.js';
 import { HandInput } from './hand-input.js';
+import { XRSessionState } from './xr-session.js';
 
 const log = window.SpatialLog;
 log?.record('app.module_loaded', { three: THREE.REVISION });
@@ -55,6 +56,7 @@ const colorNames = ['Mint', 'Amber', 'Violet', 'Rose'];
 const modes = ['relight', 'solid', 'scan', 'hidden', 'tear'];
 const modeNames = ['Light overlay', 'Virtual room', 'Scan tint', 'Passthrough', 'Reality / Mesh'];
 const state = { mode: 'relight', color: 0, strength: 0.65, dim: 0.2, wire: true, pinned: false };
+let startingAR = false;
 let session = null, arSupported = false, captureUsed = false, awaitingMenuPose = false;
 let savedRoom = [], savedCamera = null, lastTime = 0, lastUI = 0, sessionStart = 0;
 let observed = { meshes: null, planes: null }, message = 'Desktop sample room. Drag to orbit; launch a ball to test collisions.';
@@ -114,8 +116,15 @@ async function captureRoom() {
   }
   if (captureUsed) { notify('Capture was already requested. Exit and re-enter AR to request it again.'); return; }
   captureUsed = true;
-  try { await session.initiateRoomCapture(); log?.record('room.capture_returned'); notify('Room setup returned. Waiting for localized surfaces…'); }
-  catch (error) { log?.error('room.capture_failed', error); notify('Room setup: ' + error.message + '. Use headset Space Setup if necessary.'); }
+  const captureSession = session;
+  try {
+    await captureSession.initiateRoomCapture();
+    if (session !== captureSession) return;
+    log?.record('room.capture_returned'); notify('Room setup returned. Waiting for localized surfaces...');
+  } catch (error) {
+    if (session !== captureSession) return;
+    log?.error('room.capture_failed', error); notify('Room setup: ' + error.message + '. Use headset Space Setup if necessary.');
+  }
 }
 function shoot(from = null) {
   if (state.mode === 'tear') return;
@@ -149,7 +158,8 @@ const menu = new XRMenu([
 scene.add(menu.mesh);
 
 for (let i = 0; i < 2; i++) {
-  const controller = renderer.xr.getController(i);
+  const controller = new THREE.Group();
+  controller.visible = false;
   const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3(0, 0, -1)]),
     new THREE.LineBasicMaterial({ color: '#dbffc5', transparent: true, opacity: 0.6 }));
   line.scale.z = 2;
@@ -158,8 +168,9 @@ for (let i = 0; i < 2; i++) {
   controller.add(line); scene.add(controller); controllers.push(controller);
   controller.addEventListener('connected', e => { controller.userData.source = e.data; inputLog('connected', controller); });
   controller.addEventListener('disconnected', () => { inputLog('disconnected', controller); controller.userData.source = null; controller.userData.held = false; controller.userData.menuConsumed = false; clearMenuPointer(controller); tear.cancelGesture(); });
+  controller.addEventListener('trackinglost', () => { clearMenuPointer(controller); tear.cancelGesture(); });
   controller.addEventListener('selectstart', () => {
-    if (!session || session.visibilityState !== 'visible' || !controller.userData.menuTracked) return;
+    if (!session || !xrState.tracked || session.visibilityState !== 'visible' || !controller.visible) return;
     if (controller.userData.held || controller.userData.menuConsumed) return;
     controller.updateWorldMatrix(true, false);
     raycaster.ray.origin.setFromMatrixPosition(controller.matrixWorld);
@@ -171,6 +182,7 @@ for (let i = 0; i < 2; i++) {
   });
   controller.addEventListener('selectend', () => { inputLog('selectend', controller); controller.userData.held = false; controller.userData.menuConsumed = false; menu.release(i); });
   controller.addEventListener('squeezestart', () => {
+    if (!session || !xrState.tracked || session.visibilityState !== 'visible' || !controller.visible) return;
     inputLog('squeezestart', controller);
     if (controller.userData.source?.handedness === 'left') menu.place(renderer.xr.getCamera());
     else if (state.mode !== 'tear') togglePin();
@@ -179,6 +191,7 @@ for (let i = 0; i < 2; i++) {
 }
 
 function clearMenuPointer(controller) {
+  controller.userData.held = false; controller.userData.menuConsumed = false;
   menu.clearPointer(controller.userData.menuPointer);
   controller.userData.menuTracked = false;
   controller.userData.menuRay.scale.z = 2;
@@ -187,7 +200,7 @@ function clearMenuPointer(controller) {
 function updateMenuPointers(frame, referenceSpace) {
   for (const controller of controllers) {
     const source = controller.userData.source;
-    const pose = source && frame.getPose(source.targetRaySpace, referenceSpace);
+    const pose = source && controller.visible && frame.getPose(source.targetRaySpace, referenceSpace);
     if (!pose) { clearMenuPointer(controller); continue; }
     controller.userData.menuTracked = true;
     // Use this XR frame's target-ray pose, including hand-selection rays.
@@ -201,29 +214,52 @@ function updateMenuPointers(frame, referenceSpace) {
   }
 }
 
+const xrState = new XRSessionState(controllers, {
+  log: (event, data) => log?.record('xr.' + event, data),
+  suspend: suspendRoom,
+  resume: () => { lastTime = 0; awaitingMenuPose = true; menu.mesh.visible = true; lamp.visible = !tear.enabled; },
+  reset: () => {
+    // Old matrices and exported snapshots belong to the previous origin.
+    surfaces.clear(); physics.clear(); state.pinned = false; awaitingMenuPose = true;
+    syncStyle(); lamp.visible = false;
+    notify('Tracking origin changed. Waiting for fresh room poses.');
+  },
+  end: ended => { if (session === ended) endSession(); },
+});
+function suspendRoom() {
+  lastTime = 0; physics.accumulator = 0; tear.reset(); hands.reset();
+  for (const controller of controllers) clearMenuPointer(controller);
+  for (const record of surfaces.records.values()) surfaces.pose(record, null);
+  menu.mesh.visible = false; lamp.visible = false;
+}
 function endSession() {
+  if (!session) return;
   log?.record('xr.session_ended', { durationMs: performance.now() - sessionStart, surfaces: surfaces.stats(), balls: physics.balls.length });
   void log?.flush();
   if (surfaces.source !== 'demo') {
     const snapshot = surfaces.snapshot(true);
     if (snapshot.length) savedRoom = snapshot;
   }
-  session = null;
-  tear.reset(); hands.hide();
+  session = null; xrState.detach();
+  tear.reset(); hands.reset();
   for (const controller of controllers) { controller.userData.held = false; controller.userData.menuConsumed = false; clearMenuPointer(controller); }
   physics.clear(); surfaces.createDemo();
   camera.position.copy(savedCamera.position); camera.quaternion.copy(savedCamera.quaternion);
+  Object.assign(camera, savedCamera.projection);
   camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
   controls.target.copy(savedCamera.target); controls.enabled = true; controls.update();
+  renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5)); renderer.setSize(innerWidth, innerHeight);
   scene.background = background; renderer.setClearColor(background, 1);
   grid.visible = true; menu.mesh.visible = false; state.pinned = false; syncStyle();
   document.body.classList.remove('xr');
-  $('enter').textContent = 'Enter room in AR'; $('enter').disabled = !arSupported;
+  $('enter').textContent = 'Enter room in AR'; $('enter').disabled = startingAR || !arSupported;
   $('capture').disabled = true;
   $('export').textContent = savedRoom.length ? 'Download captured room (.obj)' : 'Download sample room (.obj)';
   notify(savedRoom.length ? 'AR ended. Your last localized scan is ready to download below.' : 'AR ended. No room scan was captured.');
 }
 async function enterAR() {
+  if (startingAR || session) return;
+  startingAR = true;
   log?.record('xr.session_requested', { mode: 'immersive-ar', requiredFeatures: ['local-floor'], optionalFeatures: ['mesh-detection', 'plane-detection', 'hand-tracking'] });
   $('enter').disabled = true;
   let requested = null;
@@ -232,44 +268,35 @@ async function enterAR() {
       requiredFeatures: ['local-floor'],
       optionalFeatures: ['mesh-detection', 'plane-detection', 'hand-tracking'],
     });
-    savedCamera = { position: camera.position.clone(), quaternion: camera.quaternion.clone(), target: controls.target.clone() };
-    session = requested; captureUsed = false; observed = { meshes: null, planes: null };
+    savedCamera = { position: camera.position.clone(), quaternion: camera.quaternion.clone(), target: controls.target.clone(),
+      projection: { fov: camera.fov, near: camera.near, far: camera.far, zoom: camera.zoom } };
+    session = requested; sessionStart = performance.now(); xrState.attach(requested); captureUsed = false; observed = { meshes: null, planes: null };
     log?.record('xr.session_granted', { enabledFeatures: Array.from(requested.enabledFeatures || []), blendMode: requested.environmentBlendMode, visibility: requested.visibilityState });
-    requested.addEventListener('inputsourceschange', event => log?.record('xr.inputs_changed', { added: Array.from(event.added, sourceInfo), removed: Array.from(event.removed, sourceInfo) }));
-    tear.reset(); hands.hide();
+    xrState.listen(requested, 'inputsourceschange', event => log?.record('xr.inputs_changed', { added: Array.from(event.added, sourceInfo), removed: Array.from(event.removed, sourceInfo) }));
+    tear.reset(); hands.reset();
     physics.clear(); surfaces.clear(); surfaces.source = 'waiting';
     // Desktop orbit offset must never be added to the headset's local-floor pose.
     controls.enabled = false; camera.position.set(0, 0, 0); camera.quaternion.identity(); camera.updateMatrixWorld(true);
     scene.background = null; renderer.setClearColor(0x000000, 0); grid.visible = false;
     state.pinned = false; syncStyle();
-    requested.addEventListener('end', endSession, { once: true });
-    requested.addEventListener('visibilitychange', () => {
-      log?.record('xr.visibility', { state: requested.visibilityState }); void log?.flush();
-      lastTime = 0; physics.accumulator = 0; tear.reset(); hands.hide();
-      for (const controller of controllers) { controller.userData.held = false; controller.userData.menuConsumed = false; clearMenuPointer(controller); }
-    });
     await renderer.xr.setSession(requested);
-    renderer.xr.getReferenceSpace().addEventListener('reset', () => {
-      log?.record('xr.reference_reset', {}, 'warn');
-      physics.clear(); state.pinned = false; awaitingMenuPose = true; syncStyle();
-      for (const controller of controllers) clearMenuPointer(controller);
-      tear.reset(); hands.hide();
-      notify('Tracking origin changed. Balls cleared; surfaces will follow the new poses.');
-    });
+    if (session !== requested || xrState.session !== requested) return;
+    xrState.bindReference(renderer.xr.getReferenceSpace());
     sessionStart = performance.now(); awaitingMenuPose = true; lastTime = 0;
     lastTracking = null;
     log?.record('xr.session_rendering', { referenceSpace: 'local-floor' });
-    menu.mesh.visible = true; document.body.classList.add('xr');
+    menu.mesh.visible = false; document.body.classList.add('xr');
     $('capture').disabled = false;
     notify('Look around. If no surfaces appear, choose Set up room.');
   } catch (error) {
     log?.error('xr.session_failed', error);
     if (requested) {
-      try { await requested.end(); } catch { if (session) endSession(); }
+      try { await requested.end(); } catch { /* The runtime may already have ended. */ }
+      if (session === requested) endSession();
     }
     $('enter').disabled = !arSupported;
     notify('Could not enter AR: ' + error.name + ' — ' + error.message);
-  }
+  } finally { startingAR = false; $('enter').disabled = Boolean(session) || !arSupported; }
 }
 
 $('enter').addEventListener('click', enterAR);
@@ -293,20 +320,23 @@ $('export').addEventListener('click', () => {
   setTimeout(() => URL.revokeObjectURL(url), 10000);
 });
 addEventListener('resize', () => {
+  if (session || renderer.xr.isPresenting) return;
   camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight);
 });
 syncStyle();
 
-renderer.setAnimationLoop((time, frame) => {
+function animate(time, frame) {
   frameCount++;
-  const dt = lastTime ? Math.min((time - lastTime) / 1000, 0.05) : 0;
+  let dt = lastTime ? Math.min((time - lastTime) / 1000, 0.05) : 0;
   lastTime = time;
-  if (session && frame) {
+  if (session) {
     const referenceSpace = renderer.xr.getReferenceSpace();
-    const viewer = frame.getViewerPose(referenceSpace);
-    const tracked = Boolean(viewer && session.visibilityState === 'visible');
+    const wasTracked = xrState.tracked;
+    const viewer = xrState.update(frame, referenceSpace);
+    const tracked = Boolean(viewer);
+    if (!wasTracked || !tracked) dt = 0;
     if (tracked !== lastTracking) { log?.record('xr.tracking', { tracked, visibility: session.visibilityState }, tracked ? 'info' : 'warn'); lastTracking = tracked; }
-    if (viewer && session.visibilityState === 'visible') {
+    if (tracked) {
       observed = surfaces.updateXR(frame, referenceSpace);
       viewerEye.copy(viewer.transform.position);
       for (const source of session.inputSources) if (source.gamepad) {
@@ -394,8 +424,10 @@ renderer.setAnimationLoop((time, frame) => {
       geometries: renderer.info.memory.geometries, textures: renderer.info.memory.textures });
     frameCount = 0; lastHeartbeat = time;
   }
-  renderer.render(scene, camera);
-});
+  if (!session || xrState.tracked) renderer.render(scene, camera);
+  else if (renderer.xr.isPresenting) renderer.clear(); // Clear stale XR imagery to transparent passthrough.
+}
+renderer.setAnimationLoop(animate);
 
 try { arSupported = Boolean(isSecureContext && navigator.xr && await navigator.xr.isSessionSupported('immersive-ar')); }
 catch (error) { log?.error('xr.support_check_failed', error); notify('AR support check failed: ' + error.message); }
@@ -407,4 +439,5 @@ else notify(message);
 document.body.dataset.ready = 'true';
 log?.record('app.ready');
 // Explicit opt-in for the local regression harness; no room data is uploaded.
-if (new URLSearchParams(location.search).has('test')) window.spatialLab = { scene, renderer, camera, physics, surfaces, shoot, state, syncStyle, menu, tear, hands };
+if (new URLSearchParams(location.search).has('test')) window.spatialLab = { scene, renderer, camera, physics, surfaces, shoot, state, syncStyle, menu, tear, hands, controllers, xrState, enterAR, endSession, animate, controls,
+  get session() { return session; } };

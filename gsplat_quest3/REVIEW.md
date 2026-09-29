@@ -48,3 +48,12 @@ Removed the load-complete Placed message, added per-item geometry/anchor status,
 
 Visible bounds with invisible splats shifted investigation to the renderer. Added default depth bypass (sensor request off), live right-stick depth switching, explicit GPU generation/readback flushes, render-queue diagnostics, restored asset names/cycling hints and desktop Previous/Next buttons. A new actual-Spark stereo pixel test waits for generation/sorting to settle before freezing the scene; it verifies both eye images, depth-induced hiding and restoration without changing the asset. Full suite: 72 checks including input selection/toggle regressions. The specific Quest depth/driver behavior has not been reproduced on hardware, so this is a tested visibility path and diagnostic improvement, not certification of a physical Quest fix. No new critic review was performed.
 
+
+
+## Lifecycle follow-up — 2026-09-29
+
+The primary agent audited entry/exit, headset suspension, input replacement and origin resets. Fixed session ownership and listener cleanup, controller recovery without connected events, stale/held input after tracking loss, emulated positional poses, obsolete origin transforms, desktop camera/canvas restoration and late initialization results. Anchor deadlines use tracked session time; late hit-test setup is generation-guarded, and rejected entry does not repeat permission prompts.
+
+Validation: 108 automated checks, including new synthetic lifecycle tests against the actual application handlers and the existing regression suite. No physical Quest was connected. This follow-up has not received a new independent critic review. The implementation keeps a local copy of xr-session.js in each standalone project, with no build step.
+
+Source audit: [Three r180 WebXRManager](https://github.com/mrdoob/three.js/blob/r180/src/renderers/webxr/WebXRManager.js) assigns controller slots through input-source change events and initializes the renderer asynchronously. [WebXR Device API](https://www.w3.org/TR/webxr/) defines session visibility, pose emulation, input-source events and reference-space resets. The app's source reconciliation and pause policies supplement those APIs; they cannot improve the runtime's underlying reconstruction accuracy.

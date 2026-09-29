@@ -339,3 +339,34 @@ The test injects errors labeled `SPATIAL_LOG_TEST_*` to verify error recording. 
 ## Critic review corrections
 
 Individual events are now capped at **20,000 serialized UTF-8 bytes**, with explicit truncation metadata. Older oversized outbox rows are bounded during upload while their original local data remains available. Typed-array previews copy only their first 32 elements; DataView previews use up to 32 bytes. This fixes a Unicode payload that previously blocked all later uploads. The server also supports streamed byte-range responses and rejects private key/certificate file extensions. See [REVIEW.md](REVIEW.md).
+
+
+## Headset lifecycle test sequence
+
+Run the local server and ADB reverse using the instructions above, then reload the page in Quest Browser to load the changed modules. Keep server logging enabled. The code changes are local; GitHub Pages will not change until you publish them.
+
+1. Enter AR with both controllers already awake. Confirm both rays appear. Point at a menu control: hover highlights it; one trigger press changes it once.
+2. Exit using the in-experience control, then enter again. Repeat three times, including exiting immediately after entry. Confirm rays return and actions do not duplicate.
+3. Remove the headset for 10 seconds, put it back on, and wait for tracking. Repeat for at least 30 seconds. Release all controls once, then use the menu/placement again.
+4. Repeat while holding a trigger/grip or deflecting a thumbstick. Returning must not fire, place, delete, drag or change values until controls have returned to neutral.
+5. Open and close the Quest system menu. Treat visible-blurred as suspended; interactions must not continue behind the overlay.
+6. Put the controllers down, switch to hand tracking, then pick them back up. Confirm source replacement, disappearance of untracked rays and return of the current sources. In tear mode, open both hands before a new pinch after tracking recovery.
+7. Walk around a clearly identifiable floor/wall edge. The overlay and collisions must remain aligned with that edge while the viewer moves. If tracking is lost, stale imagery should clear instead of sticking to your view.
+8. Recenter/change the tracking origin. Old surfaces and balls should disappear, then room surfaces should return only with fresh poses.
+9. Exit AR and orbit the desktop preview. Confirm the camera, canvas and controls are normal. Cancel/deny another entry attempt and confirm Enter AR remains usable.
+
+After a failure, add a recorder marker describing the step and export/download the recording. Search for these lifecycle events:
+
+| Event | Meaning |
+| --- | --- |
+| xr.source_bound / xr.source_unbound | Input source ownership, handedness and hand/controller type |
+| xr.sources_changed | Runtime source-add/remove notifications; per-frame reconciliation also catches missing notifications |
+| xr.visibility | visible, visible-blurred or hidden |
+| xr.suspended | Reason interaction and rendering were suspended |
+| xr.resumed | Pause duration and number of currently localized input sources |
+| xr.reference_reset | The coordinate origin changed; old alignment was invalidated |
+| xr.input_ignored | A trigger/grip event was rejected; includes tracking, visibility and neutral-control readiness |
+
+For example, source_bound followed by resumed with zero sources means the source exists but its positional pose is unavailable. input_ignored with ready=false generally means release the controls once. A recurring reference_reset indicates origin changes, not normal head motion. Browser/device logs are still needed for runtime crashes or OS tracking failures that happen outside JavaScript.
+
+Automated verification: run node tests/smoke.mjs. The suite now includes 107 checks, with synthetic session events exercising the actual app entry/exit/frame handlers, plus the existing geometry, collision, menu and framebuffer checks. Fixtures cover controller identity/replacement, held-input resume, emulated poses, stale sessions, reference resets, interrupted setup and setup rejection. These do not emulate Meta's native compositor, permission UI or physical room relocalization; the headset sequence above remains necessary.

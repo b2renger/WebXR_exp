@@ -96,3 +96,14 @@ Spark 2.1.0 generation and asynchronous sort readback now explicitly flush GPU c
 
 The 72-check suite now includes **real Spark GPU pixel checks through a synthetic stereo XR camera**: both eyes draw splats, an opaque depth surface hides them, and depth bypass restores them without replacing the asset. It also tests desktop and thumbstick asset selection and the live depth switch. This is stronger than the prior load/placement checks, but does not validate the Quest driver or its depth texture. Depth remains experimental. See [Spark renderer options](https://sparkjs.dev/docs/spark-renderer/) and the pinned [Three.js depth implementation](https://github.com/mrdoob/three.js/blob/r180/src/renderers/webxr/WebXRDepthSensing.js).
 
+
+
+## Session lifecycle and tracking recovery (September 2026)
+
+Controllers are reconciled from the current session's input sources on entry and every XR frame, including hand/controller replacement. Rays use current target-ray poses in the same reference space as the room. They no longer depend on Three's cached controller connection events.
+
+Removing the headset, opening a system overlay, or losing positional tracking immediately cancels held interactions. Content is hidden and any remaining XR frames are cleared to passthrough. Returning to visible is insufficient: a fresh, non-emulated viewer pose is required. Release buttons, triggers and thumbsticks once after recovery before using them. The controller HUD returns with a localized input source. Anchor localization timeouts pause while tracking is suspended.
+
+An ordinary pause preserves room placement and waits for fresh anchor poses. A reference-space reset invalidates the old alignment and asks you to trigger on a surface to re-anchor the saved layout. It does not guess a position in front of you if surface detection fails.
+
+Session entry is serialized. Exit removes session/reference listeners and restores the desktop camera pose, projection, canvas size and controls. Late initialization results cannot revive an ended session. See [the headset lifecycle test sequence](LOCAL_DEBUGGING.md#headset-lifecycle-test-sequence) for hardware validation.

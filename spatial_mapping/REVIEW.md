@@ -35,3 +35,12 @@ Validation: **66 checks passed** with real Three.js/Rapier, synthetic XR surface
 
 After the critic-approved baseline, pointer hover and pressed feedback were added, with immediate label updates and one activation per trigger press. Ten additional automated checks cover hover without activation, stable texture updates, pressed feedback, repeat prevention, pointer independence, padding consumption and cleanup. The primary agent ran the full 76-check suite successfully. This follow-up has not received a new critic review or physical Quest test.
 
+
+
+## Lifecycle follow-up — 2026-09-29
+
+The primary agent audited entry/exit, headset suspension, input replacement and origin resets. Fixed session ownership and listener cleanup, controller recovery without connected events, stale/held input after tracking loss, emulated positional poses, obsolete origin transforms, desktop camera/canvas restoration and late initialization results. Room surfaces and colliders now suspend immediately; fresh poses restore them, and an origin reset clears the old geometry.
+
+Validation: 107 automated checks, including new synthetic lifecycle tests against the actual application handlers and the existing regression suite. No physical Quest was connected. This follow-up has not received a new independent critic review. The implementation keeps a local copy of xr-session.js in each standalone project, with no build step.
+
+Source audit: [Three r180 WebXRManager](https://github.com/mrdoob/three.js/blob/r180/src/renderers/webxr/WebXRManager.js) assigns controller slots through input-source change events and initializes the renderer asynchronously. [WebXR Device API](https://www.w3.org/TR/webxr/) defines session visibility, pose emulation, input-source events and reference-space resets. The app's source reconciliation and pause policies supplement those APIs; they cannot improve the runtime's underlying reconstruction accuracy.

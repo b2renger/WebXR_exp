@@ -143,7 +143,7 @@ export async function run(lab) {
   const hand = new Map([['thumb-tip', 'thumb'], ['index-finger-tip', 'index']]);
   const source = { hand, handedness: 'left' };
   let gap = 0.02;
-  const handFrame = { getJointPose: joint => ({ radius: 0.008, transform: { position: { x: joint === 'thumb' ? 0 : gap, y: 1.4, z: -0.5 } } }) };
+  const handFrame = { getJointPose: joint => ({ radius: 0.008, transform: { matrix: new THREE.Matrix4().makeTranslation(joint === 'thumb' ? 0 : gap,1.4,-0.5).elements, position: { x: joint === 'thumb' ? 0 : gap, y: 1.4, z: -0.5 } } }) };
   const tracked = new HandInput(new THREE.Scene(), tear.uniforms);
   assert(tracked.sample(handFrame, {}, [source], [], true).left.held, 'Close fingertips register a pinch');
   gap = 0.032;

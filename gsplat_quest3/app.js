@@ -14,6 +14,12 @@ const TARGET_H    = positiveParam('height', 1);      // auto-fit height for new 
 const XR_SCALE    = Math.min(positiveParam('xrscale', 0.75), 1);
 const LOD_BUDGET  = positiveParam('budget', undefined); // undefined = Spark's platform default (500K on Quest)
 const MAX_SH      = 1;                                   // SH degree 1: most of the look, a fraction of the SH3 cost
+// Depth occlusion: 'soft' fades splats out over a band just behind real surfaces;
+// 'hard' is a cheaper sharp edge in the middle of that band. ?band= is the band as a
+// fraction of distance (0.06 = 12 cm at 2 m). Splats on or in front of a surface stay
+// fully visible, so objects resting on the floor don't flicker with sensor noise.
+const OCCLUSION_SOFT = params.get('occlusion') !== 'hard';
+const OCCLUSION_BAND = Math.min(positiveParam('band', 0.06), 0.5);
 const MOVE_SPEED  = 0.6, ROT_SPEED = 1.4, SCALE_RATE = 1.2, DEADZONE = 0.15;
 const STORE_KEY   = 'splat-placer-v2:' + location.pathname;
 
@@ -69,6 +75,92 @@ const spark = new SparkRenderer({ renderer, enableLod: true, depthTest: false,
 spark.flushAfterGenerate = true;
 spark.flushAfterRead = true;
 scene.add(spark);
+
+// ---------------------------------------------------------------------------
+// Depth occlusion quality. Quest's depth map is much coarser than the eye buffer
+// and three's stock pass copies one depth texel per pixel, so occlusion edges
+// show the texel grid. Both passes below read the 4 texels around each pixel:
+//  - the depth-priming pass (one fragment per pixel) writes a smooth depth. In
+//    soft mode it is pushed back so the GPU still rejects splats clearly behind
+//    real surfaces early, without running their shader;
+//  - soft mode only: the splat shader fades fragments across the band around the
+//    surface, blending the 4 texels' visibility (percentage-closer filtering).
+// ---------------------------------------------------------------------------
+const occlusion = {
+  envDepth: { value: null }, envEyeSize: { value: new THREE.Vector2(1, 1) },
+  envSoft: { value: false }, envBand: { value: OCCLUSION_BAND },
+};
+const ENV_DEPTH_GLSL = /* glsl */`
+uniform highp sampler2DArray envDepth;   // XR depth texture: one layer per eye
+uniform vec2 envEyeSize;                 // one eye's viewport in framebuffer pixels
+uniform bool envSoft;
+uniform float envBand;
+uniform mat4 projectionMatrix;
+// View-axis distance of a [0,1] window depth under this eye's projection.
+float envViewDist(float d) {
+  return d >= 1.0 ? 1e9 : projectionMatrix[3][2] / (2.0 * d - 1.0 + projectionMatrix[2][2]);
+}
+// Distances at the 4 depth texels around this pixel; f gets the bilinear weights.
+vec4 envTaps(out vec2 f) {
+  vec2 uv = gl_FragCoord.xy / envEyeSize;
+  int layer = uv.x >= 1.0 ? 1 : 0;   // the right eye's viewport sits right of the left's
+  uv.x -= float(layer);
+  ivec2 size = textureSize(envDepth, 0).xy, hi = size - 1;
+  vec2 p = uv * vec2(size) - 0.5;
+  ivec2 i = ivec2(floor(p));
+  f = fract(p);
+  #define ENV_TAP(o) envViewDist(texelFetch(envDepth, ivec3(clamp(i + o, ivec2(0), hi), layer), 0).r)
+  return vec4(ENV_TAP(ivec2(0, 0)), ENV_TAP(ivec2(1, 0)), ENV_TAP(ivec2(0, 1)), ENV_TAP(ivec2(1, 1)));
+}
+float envBilerp(vec4 v, vec2 f) { return mix(mix(v.x, v.y, f.x), mix(v.z, v.w, f.x), f.y); }
+`;
+// Replaces three's depth-priming fragment shader (WebXRDepthSensing).
+const PRIME_FRAGMENT = ENV_DEPTH_GLSL + /* glsl */`
+void main() {
+  vec2 f;
+  vec4 dist = envTaps(f);
+  // Soft: reject only splats with zero visibility, i.e. a full band behind every
+  // texel. Hard: the smooth surface, pushed back half a band.
+  float d = envSoft ? max(max(dist.x, dist.y), max(dist.z, dist.w)) / (1.0 - envBand)
+                    : envBilerp(dist, f) / (1.0 - 0.5 * envBand);
+  gl_FragDepth = clamp(0.5 * (projectionMatrix[3][2] / d - projectionMatrix[2][2]) + 0.5, 0.0, 1.0);
+  gl_FragColor = vec4(0.0);   // transparent: passthrough shows through
+}`;
+const SOFT_PATCHED = (() => {
+  const patched = spark.material.fragmentShader
+    .replace('out vec4 fragColor;', 'out vec4 fragColor;\n' + ENV_DEPTH_GLSL)
+    .replace('if (rgba.a < minAlpha) {', /* glsl */`if (envSoft) {
+        vec2 f;
+        vec4 env = envTaps(f);
+        float self = envViewDist(0.5 * vNdc.z + 0.5);
+        // 1 at/in front of the surface, 0 a band behind it; blend the 4 texels' results.
+        rgba.a *= envBilerp(clamp((env - self) / (envBand * self) + 1.0, 0.0, 1.0), f);
+    }
+    if (rgba.a < minAlpha) {`);
+  if (!patched.includes('uniform bool envSoft') || !patched.includes('rgba.a *= envBilerp')) {
+    L('error', 'Spark shader changed: soft occlusion unavailable, using hard');
+    return false;
+  }
+  spark.material.fragmentShader = patched;
+  Object.assign(spark.material.uniforms, occlusion);
+  spark.material.needsUpdate = true;
+  return true;
+})();
+// Called every frame before rendering.
+function updateOcclusion() {
+  const xr = renderer.xr, depth = xr.isPresenting ? xr.getDepthTexture() : null;
+  occlusion.envDepth.value = depth;
+  occlusion.envSoft.value = OCCLUSION_SOFT && SOFT_PATCHED && !!depth && spark.material.depthTest;
+  const viewport = xr.isPresenting && xr.getCamera().cameras[0]?.viewport;
+  if (viewport) occlusion.envEyeSize.value.set(viewport.z, viewport.w);
+  const prime = depth && xr.getDepthSensingMesh();
+  if (prime && prime.material.fragmentShader !== PRIME_FRAGMENT) {
+    Object.assign(prime.material.uniforms, occlusion);
+    prime.material.fragmentShader = PRIME_FRAGMENT;
+    prime.material.needsUpdate = true;
+    L('occlusion_filtered', { soft: OCCLUSION_SOFT, band: OCCLUSION_BAND, eye: occlusion.envEyeSize.value.toArray() });
+  }
+}
 function setOcclusion(enabled) {
   spark.material.depthTest = enabled;
   document.getElementById('occl').checked = enabled;
@@ -492,7 +584,9 @@ function arInit(withFloor, withDepth) {
     // real-world geometry occludes the splats (broken in r179-r180, three#32155;
     // needs r181+). NaN union projections (Quest reports depthFar=Infinity,
     // three#29098) are repaired in the frame loop.
-    init.depthSensing = { usagePreference: ['gpu-optimized'], dataFormatPreference: ['float32', 'luminance-alpha', 'unsigned-short'] };
+    // depthTypeRequest is newer spec: browsers that don't know it ignore it.
+    init.depthSensing = { usagePreference: ['gpu-optimized'], dataFormatPreference: ['float32', 'luminance-alpha', 'unsigned-short'],
+      depthTypeRequest: ['smooth', 'raw'] };
   }
   return init;
 }
@@ -1094,7 +1188,7 @@ addEventListener('resize', () => {
 // ---------------------------------------------------------------------------
 const timer = new THREE.Timer();   // THREE.Clock is deprecated since r183
 let lastSample = 0;
-let nanFixLogged = false;
+let nanFixLogged = false, depthInfoSession = null;
 let hb = { frames: 0, last: 0 };   // heartbeat: fps + state every 5s while presenting
 
 function animate(time, frame) {
@@ -1126,6 +1220,16 @@ function animate(time, frame) {
       camera.projectionMatrix.copy(xrCam.projectionMatrix);
       camera.projectionMatrixInverse.copy(xrCam.projectionMatrixInverse);
       if (!nanFixLogged) { nanFixLogged = true; L('fix', 'repaired NaN depth column in union projection (three#29098)'); }
+    }
+    // Once per session: what depth the runtime actually granted (size is fixed by the device).
+    const session = renderer.xr.getSession();
+    if (depthInfoSession !== session && renderer.xr.hasDepthSensing()) {
+      depthInfoSession = session;
+      try {
+        const info = renderer.xr.getBinding().getDepthInformation(viewer.views[0]);
+        L('depth_info', { usage: session.depthUsage, format: session.depthDataFormat, type: session.depthType,
+          width: info?.width, height: info?.height, near: info?.depthNear, far: String(info?.depthFar) });
+      } catch (error) { L('depth_info', { error: String(error) }); }
     }
 
     const hudController = controllers.find(c => c.visible && c.userData.handedness === 'left') || controllers.find(c => c.visible);
@@ -1213,6 +1317,7 @@ function animate(time, frame) {
     xrTracking = false; controls.update();
   }
   reportPlacement();
+  updateOcclusion();
   renderer.render(scene, camera);
 }
 renderer.setAnimationLoop(animate);
@@ -1228,7 +1333,7 @@ renderer.domElement.addEventListener('webglcontextrestored', () => L('webgl_cont
 document.body.dataset.ready = 'true';
 L('ready', { items: items.length });
 // Debug hooks expose the real implementation for console use and regressions.
-window.__placer = { items, library, get selected() { return selected; }, keys, renderer, camera, controllers, anchorNode, spark, scene, hud, xrState, arBtn, controls, endExperience, setOcclusion, cycleAsset,
+window.__placer = { items, library, get selected() { return selected; }, keys, renderer, camera, controllers, anchorNode, spark, scene, hud, xrState, arBtn, controls, endExperience, setOcclusion, cycleAsset, occlusion, PRIME_FRAGMENT, SOFT_PATCHED,
   placeItem, selectItem, onSqueeze, onTrigger, processPlacement, makeRoomAnchor, beginRestore, invalidateAnchors,
   cancelInput, importLayout, validateLayout, layoutSnapshot, saveNow, grab, pinch, animate, handleGamepads, handleKeys, setupHitTest, updateRoomAnchor, reportPlacement,
   get state() { return { xrAnchor, anchorGeneration, persistedAnchorUUID, restorePending, roomAnchored, pendingPlacement, hitTestSource, placing, currentAsset }; },

@@ -112,7 +112,8 @@
   }
   async function flush() {
     drain?.();
-    if (transmitting) return transmitting;
+    // An upload already in flight started before this call's events: send again after it.
+    if (transmitting) return transmitting.then(() => flush());
     transmitting = (async () => {
       await queue;
       if (!serverWanted) return;

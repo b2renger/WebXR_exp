@@ -8,13 +8,14 @@
   Multi-splat AR placement tool.
 
   LOD + streaming (inspired by PlayCanvas/SuperSplat streamed SOG):
-    - any .sog/.spz/.ply gets a runtime LOD hierarchy (SplatMesh lod:true, built in a WebWorker)
+    - any .sog/.spz/.ply gets a runtime LOD hierarchy (PackedSplats lod:true, built in a WebWorker
+      before the asset appears), shared by every placed copy of that asset
     - pre-built chunked .rad files stream pages on demand (SplatMesh paged:true, SplatPager LRU pool)
-      build them with Spark's tool:  npm run build-lod - - my.sog - -rad-chunked   (needs Rust)
-    - SparkRenderer budgets splats per platform (500-750K in WebXR) with view-cone foveation,
+      see OPTIMIZING_SPLATS.md for preparing captures
+    - SparkRenderer budgets splats per platform (500K on Quest) with view-cone foveation,
       the same budget-balancing idea as PlayCanvas's gsplat-unified renderer.
 
-  Occlusion: WebXR depth-sensing (gpu-optimized). three r180 auto-renders a depth-priming
+  Occlusion: WebXR depth-sensing (gpu-optimized). three (r181+) auto-renders a depth-priming
   pass at renderOrder -Infinity, so real-world geometry occludes the splats.
 
   Persistence: layout saved to localStorage; in AR the whole layout hangs off ONE room anchor,
@@ -68,9 +69,9 @@
 <script type="importmap">
 {
   "imports": {
-    "three": "https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js",
-    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/",
-    "@sparkjsdev/spark": "https://sparkjs.dev/releases/spark/2.1.0/spark.module.js"
+    "three": "https://cdn.jsdelivr.net/npm/three@0.186.1/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.186.1/examples/jsm/",
+    "@sparkjsdev/spark": "https://sparkjs.dev/releases/spark/2.3.1/spark.module.js"
   }
 }
 </script>
@@ -114,7 +115,7 @@
   <details id="logs-panel">
     <summary>Recording &amp; logs</summary>
     <pre id="logs-status"></pre>
-    <label><input id="logs-poses" type="checkbox" checked> Record poses and transforms (5 Hz)</label>
+    <label><input id="logs-poses" type="checkbox"> Record poses and transforms (5 Hz, costs frame time)</label>
     <div><button id="logs-download">Download this session</button><button id="logs-download-all">Download all</button><button id="logs-flush">Sync now</button></div>
     <p><a href="./logs.html" target="_blank">PC log viewer</a> · <a href="./LOCAL_DEBUGGING.md">Local debugging guide</a></p>
     <input id="logs-note" placeholder="Recording marker"><button id="logs-mark">Add marker</button>

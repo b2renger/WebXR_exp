@@ -75,6 +75,25 @@
     if (fallback.length >= 10000) { fallback.shift(); status.dropped++; }
     fallback.push({ event, synced: 0 });
   }
+  // Events within ~200 ms share one IndexedDB transaction: one per event caused
+  // main-thread hitches in the headset. flush() (pagehide, hidden, 1 Hz) drains early.
+  let batch = null, drain = null;
+  function persist(entry) {
+    if (batch) { batch.push(entry); return; }
+    const rows = batch = [entry];
+    queue = queue.then(() => new Promise(resolve => { drain = resolve; setTimeout(resolve, 200); })).then(async () => {
+      batch = drain = null;
+      await ready;
+      if (!db) { rows.forEach(rememberFallback); return; }
+      try {
+        await transaction('readwrite', store => { for (const event of rows) store.add({ event, synced: 0 }); });
+        status.saved += rows.length;
+      } catch (error) {
+        status.storage = 'IndexedDB + unsaved memory'; status.lastError = error.message;
+        rows.forEach(rememberFallback);
+      }
+    }).catch(error => { status.lastError = error.message; rows.forEach(rememberFallback); });
+  }
   function record(event, data = {}, level = 'info') {
     let normalized;
     try { normalized = safe(data); } catch { normalized = '[serialization failed]'; }
@@ -82,17 +101,7 @@
       elapsedMs: Math.round((performance.now() - started) * 1000) / 1000, level: ['info', 'warn', 'error', 'debug'].includes(level) ? level : 'info', event: String(event).slice(0, 120), data: normalized });
     tail.push(entry); if (tail.length > 300) tail.shift();
     status.recorded++;
-    queue = queue.then(async () => {
-      await ready;
-      if (!db) { rememberFallback(entry); return; }
-      try {
-        await transaction('readwrite', store => store.add({ event: entry, synced: 0 }));
-        status.saved++;
-      } catch (error) {
-        status.storage = 'IndexedDB + unsaved memory'; status.lastError = error.message;
-        rememberFallback(entry);
-      }
-    }).catch(error => { status.lastError = error.message; rememberFallback(entry); });
+    persist(entry);
     return entry;
   }
   async function pendingRows() {
@@ -102,6 +111,7 @@
     return rows.concat(fallback.filter(row => row.synced === 0).slice(0, 32));
   }
   async function flush() {
+    drain?.();
     if (transmitting) return transmitting;
     transmitting = (async () => {
       await queue;
@@ -169,7 +179,7 @@
     tail: () => tail.slice(), settled: () => queue,
     error: (event, error, data = {}) => record(event, { ...data, error }, 'error'),
     marker: text => record('user.marker', { text }),
-    motion: params.get('poses') !== '0',
+    motion: params.get('poses') === '1',   // opt-in: 5 Hz pose samples cost frame time in the headset
   };
   for (const level of ['log', 'info', 'warn', 'error', 'debug']) {
     originals[level] = console[level].bind(console);

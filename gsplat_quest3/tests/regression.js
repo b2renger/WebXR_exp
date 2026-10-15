@@ -8,7 +8,7 @@ export async function run(app) {
   const item = app.items[0]; // Created through the real Place button and canvas input by smoke.mjs.
   await item.ready;
   for (let i=0; i<60 && !item._fitted; i++) await pause(250);
-  check(item.loaded && item._fitted && item.splat.numSplats > 0, 'Real SOG loads and fits with Spark runtime LOD');
+  check(item.loaded && item._fitted && item.splatCount > 0, 'Real SOG loads and fits with Spark runtime LOD');
   check(Math.abs(item.rig.scale.x - item.baseScale) < 0.001, 'Delayed loading auto-fits untouched selected item');
   await pause(750); // Let Spark finish its asynchronous first sort before the visual check.
   app.renderer.render(item.rig.parent.parent, app.camera);
@@ -136,9 +136,14 @@ export async function run(app) {
     app.grab.active=true;app.grab.ctrl=right;app.grab.item=item;right.userData.grabbing=true;app.keys.add('w');
     right.dispatchEvent({type:'disconnected'});
     check(!app.grab.active && !app.pinch.active && !right.userData.grabbing && !app.keys.size,'Controller disconnect clears manipulation and held input');
+    const twin=app.placeItem(item.asset,new THREE.Vector3(1,0,0),0);await twin.ready;
+    check(twin.loaded && twin.packed===item.packed && item.packed.users===2,'Placing an asset again reuses its loaded splats');
+    twin.remove();
+    check(item.packed.users===1 && item.packed.lodSplats?.packedArray,'Removing one copy keeps the shared splats for the others');
     app.grab.active=true;app.grab.item=item;app.pinch.active=true;app.pinch.item=item;
     item.remove();item.remove();
     check(!app.items.includes(item) && !app.grab.active && !app.pinch.active,'Removing a held item cancels manipulation and is idempotent');
+    check(item.packed.users===0 && !item.asset.splats && !item.packed.lodSplats,'Removing the last copy frees the shared splats');
   } finally {
     app.cancelInput('test cleanup');app.invalidateAnchors();
     Object.assign(xr,original);app.configureTest({roomAnchored:false,placing:false,persistedAnchorUUID:null,hitTestSource:null,trackedSources:new Set()});

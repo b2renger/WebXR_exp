@@ -82,7 +82,7 @@ Recording includes:
 - Asset load/fitting/failure, saved layouts, five-second XR heartbeat, WebGL context events, console messages, uncaught errors, promise rejections and failed resources.
 - At up to 5 Hz when enabled: viewer and controller transforms, gamepad state, anchor transform and item transforms. These are samples; a brief axis/button movement between polls may be absent. Raw hand joints, passthrough video, depth images and full splat geometry are not recorded.
 
-Use `?poses=0` or uncheck the panel option to disable pose/transform samples. Text typed into ordinary form fields is not recorded as keystrokes; explicit markers, asset URLs and imported/saved layout metadata are recorded. Review exports before sharing them.
+Pose/transform samples are off by default because they cost frame time in the headset; enable them with `?poses=1` or the panel option when you need them. Text typed into ordinary form fields is not recorded as keystrokes; explicit markers, asset URLs and imported/saved layout metadata are recorded. Review exports before sharing them.
 
 ### Storage and delivery
 

@@ -30,8 +30,8 @@ export async function testXrRendering(app) {
   }
   try {
     renderer.setAnimationLoop(null);spark.autoUpdate=false;
-    const deadline=performance.now()+10000;
-    while(spark.sorting || spark.updateTimeoutId !== -1) { if(performance.now()>deadline)throw new Error('Spark sorting did not settle');renderer.getContext().flush();await new Promise(resolve=>setTimeout(resolve,20)); }
+    const deadline=performance.now()+30000; // SwiftShader: one sort of ~400K splats takes ~6 s
+    while(spark.sorting || spark.updateTimeoutId !== undefined) { if(performance.now()>deadline)throw new Error('Spark sorting did not settle');renderer.getContext().flush();await new Promise(resolve=>setTimeout(resolve,20)); }
     scene.updateMatrixWorld(true);
     await spark.update({scene,camera});
     xr.isPresenting=true;xr.getCamera=()=>stereo;xr.getSession=()=>({renderState:{}});xr.getDepthSensingMesh=()=>null;

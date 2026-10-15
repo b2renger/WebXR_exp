@@ -54,10 +54,11 @@ Spatial access, persistent anchors, and depth availability depend on the browser
 
 ## Rendering and limitations
 
-- Three.js is pinned to r180 and Spark to 2.1.0 in `index.html`. CDN access is needed for startup.
-- Non-RAD sources use `lod: true, nonLod: true`. They download and build LOD at runtime; they are not progressive network streaming. [Spark's LOD documentation](https://sparkjs.dev/docs/lod-getting-started/) describes precomputation.
+- Three.js is pinned to r186.1 and Spark to 2.3.1 in `index.html`. CDN access is needed for startup. Do not go back below r181: r179–r180 broke WebXR depth sensing ([three#32155](https://github.com/mrdoob/three.js/issues/32155)).
+- Non-RAD sources load once per asset into a shared `PackedSplats({ lod: true })`; every placed copy reuses the same download, decode and LOD tree. The LOD tree is built in a worker *before* the asset appears, so a multi-million-splat capture shows nothing for a long time (23 s on a desktop for 2.9M splats, much longer on Quest). This is not progressive streaming. Prepare large captures first: see [OPTIMIZING_SPLATS.md](OPTIMIZING_SPLATS.md).
+- Quest rendering defaults: XR framebuffer scale 0.75 (`?xrscale=0.5`…`1`), three's default maximum fixed foveation, Spark `maxStdDev` √5 (its VR recommendation), spherical harmonics capped at degree 1, Spark's platform LOD budget (500K splats on Quest; override with `?budget=300000`), and a 4.2M-splat pool for paged `.rad` assets. Read the five-second `hb` fps log while changing these.
 - Paged `.rad` assets use `paged: true`. The local server supports HTTP byte ranges; remote hosts must support the ranges and CORS needed by Spark. Verify `206 Partial Content` responses in DevTools. The bundled samples are SOG, so real RAD page loading remains a manual check.
-- New objects fit to one metre tall by default (`?height=2` changes this). An actual user transform prevents a later loading callback from changing its scale. Captures are assumed Y-down and flipped around X; differently authored captures need an orientation adjustment in `PlacedItem.refit()`.
+- New objects fit to one metre tall by default (`?height=2` changes this). The fit uses the 1st–99th percentile of ~20K sampled splat centres, so stray floaters do not shrink or offset the object. An actual user transform prevents a later loading callback from changing its scale. Captures are assumed Y-down and flipped around X; differently authored captures need an orientation adjustment in `PlacedItem.refit()`.
 - Selection uses bounding boxes, not individual visible splats. There is no collision simulation.
 - Depth occlusion requests GPU depth on AR entry; Three.js renders its depth prepass when the feature is granted. The projection repair handles nonfinite depth columns observed with infinite far planes. Correct stereo occlusion and sorting still need Quest validation. Depth here is not fused into a mesh, exported, or recorded as images.
 
@@ -75,11 +76,11 @@ node tests/smoke.mjs
 
 The runner needs Node 22+, installed Chrome (`CHROME_PATH` can override its path), and CDN access. It starts an isolated server and browser profile. It loads a real bundled SOG with Spark and tests layout preservation, active-frame anchor creation, late async results, pinch saving, input cancellation, byte-range serving, durable log sync, offline recovery, and failed startup recording. Screenshots go to `.test-output/`. Temporary profiles and log directories are retained under the OS temp directory for inspection.
 
-The latest automated run passed **72 checks**. These checks use synthetic XR objects for lifecycle tests; they do not certify real Quest tracking, stereo rendering, permissions, anchor localization, or frame rate. See [REVIEW.md](REVIEW.md) for the critic review and remaining hardware checks.
+The latest automated run (2026-10-15) passed **111 checks**. These checks use synthetic XR objects for lifecycle tests; they do not certify real Quest tracking, stereo rendering, permissions, anchor localization, or frame rate. See [REVIEW.md](REVIEW.md) for the critic review and remaining hardware checks.
 
 ## Files
 
-`index.html` contains UI and the import map; `app.js` contains rendering and interaction logic. `logger.js` starts recording before modules load. `serve.mjs` is the optional local server and durable log receiver; `logs.html` is its PC viewer. Both XR experiments intentionally carry standalone copies of the same recorder/protocol/server implementation so either directory can be hosted alone.
+`index.html` contains UI and the import map; `app.js` contains rendering and interaction logic. [OPTIMIZING_SPLATS.md](OPTIMIZING_SPLATS.md) explains how to make captures Quest-ready with free tools. `logger.js` starts recording before modules load. `serve.mjs` is the optional local server and durable log receiver; `logs.html` is its PC viewer. Both XR experiments intentionally carry standalone copies of the same recorder/protocol/server implementation so either directory can be hosted alone.
 
 
 
@@ -92,7 +93,7 @@ Depth occlusion is now **off by default**: the app omits the optional depth requ
 
 The headset HUD again shows the current asset name and index. In placement mode (**A/X**), move either thumbstick left/right to choose a splat and trigger at the ring to place it. Previous splat / Next splat buttons and clickable library rows work on desktop. The HUD follows the left controller, or the tracked right controller when the left is unavailable.
 
-Spark 2.1.0 generation and asynchronous sort readback now explicitly flush GPU commands. The HUD's Queued count is Spark's active splat count, not a count of visible pixels. Five-second splat.render_diagnostics events include loaded/queued/instanced counts, sorting state, render sizes, depth state, and both eye projections. Zero queued splats suggests loading/LOD/sorting; a nonzero queue with no visible splats points toward rendering/camera/depth.
+Spark generation and asynchronous sort readback explicitly flush GPU commands. The HUD's Queued count is Spark's active splat count, not a count of visible pixels. Five-second splat.render_diagnostics events include loaded/queued/instanced counts, sorting state, render sizes, depth state, and both eye projections. Zero queued splats suggests loading/LOD/sorting; a nonzero queue with no visible splats points toward rendering/camera/depth.
 
 The 72-check suite now includes **real Spark GPU pixel checks through a synthetic stereo XR camera**: both eyes draw splats, an opaque depth surface hides them, and depth bypass restores them without replacing the asset. It also tests desktop and thumbstick asset selection and the live depth switch. This is stronger than the prior load/placement checks, but does not validate the Quest driver or its depth texture. Depth remains experimental. See [Spark renderer options](https://sparkjs.dev/docs/spark-renderer/) and the pinned [Three.js depth implementation](https://github.com/mrdoob/three.js/blob/r180/src/renderers/webxr/WebXRDepthSensing.js).
 
@@ -107,3 +108,12 @@ Removing the headset, opening a system overlay, or losing positional tracking im
 An ordinary pause preserves room placement and waits for fresh anchor poses. A reference-space reset invalidates the old alignment and asks you to trigger on a surface to re-anchor the saved layout. It does not guess a position in front of you if surface detection fails.
 
 Session entry is serialized. Exit removes session/reference listeners and restores the desktop camera pose, projection, canvas size and controls. Late initialization results cannot revive an ended session. See [the headset lifecycle test sequence](LOCAL_DEBUGGING.md#headset-lifecycle-test-sequence) for hardware validation.
+
+
+## Performance pass — 2026-10-15
+
+- **Upgrade:** three r180 → r186.1, Spark 2.1.0 → 2.3.1. r179–r180 never bound the WebXR depth texture ([three#32155](https://github.com/mrdoob/three.js/issues/32155)), so depth occlusion hid every splat. That is the likely cause of the 15 Sept "box visible, splats invisible" report. Spark 2.2+ also fixes a WebGL state bug that could upload the HUD texture upside down ([spark#405](https://github.com/sparkjsdev/spark/issues/405)). Depth occlusion still defaults to off until it is re-tested on a Quest.
+- **Rendering:** removed the `setFoveation(0.3)` override (three's default is the maximum, 1.0); XR framebuffer scale 0.75; `maxStdDev` √5; SH capped at degree 1; explicit paged-pool size. `?xrscale=` and `?budget=` tune on the headset.
+- **Loading:** one `PackedSplats` per asset, shared by all its placed copies and freed with the last one. Dropped `nonLod`, which kept a second full-resolution copy and never displayed anything early. Bounds come from ~20K sampled centres, trimmed to the 1st–99th percentile, instead of a main-thread pass over every splat.
+- **Recorder:** pose sampling is opt-in (`?poses=1`), and events are written in one IndexedDB transaction per ~200 ms.
+- **Tests:** 111 checks, including asset sharing and release. Headset frame rate and depth occlusion still need a Quest session.

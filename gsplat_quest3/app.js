@@ -1,15 +1,19 @@
 ﻿
 import * as THREE from 'three';
 import { XRSessionState, localizedPose } from './xr-session.js';
-import { SparkRenderer, SplatMesh } from '@sparkjsdev/spark';
+import { SparkRenderer, SplatMesh, PackedSplats, unpackSplat } from '@sparkjsdev/spark';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
 const params      = new URLSearchParams(location.search);
-const requestedHeight = Number(params.get('height') || 1);
-const TARGET_H = Number.isFinite(requestedHeight) && requestedHeight > 0 ? requestedHeight : 1; // auto-fit height for new items, metres
+const positiveParam = (name, fallback) => { const v = Number(params.get(name)); return Number.isFinite(v) && v > 0 ? v : fallback; };
+const TARGET_H    = positiveParam('height', 1);      // auto-fit height for new items, metres
+// Quest is fill-rate bound with splats. ?xrscale=0.5..1 and ?budget=<splats> tune on the headset.
+const XR_SCALE    = Math.min(positiveParam('xrscale', 0.75), 1);
+const LOD_BUDGET  = positiveParam('budget', undefined); // undefined = Spark's platform default (500K on Quest)
+const MAX_SH      = 1;                                   // SH degree 1: most of the look, a fraction of the SH3 cost
 const MOVE_SPEED  = 0.6, ROT_SPEED = 1.4, SCALE_RATE = 1.2, DEADZONE = 0.15;
 const STORE_KEY   = 'splat-placer-v2:' + location.pathname;
 
@@ -17,7 +21,7 @@ const statusEl = document.getElementById('status');
 const say = (msg, isErr) => { statusEl.textContent = msg; statusEl.classList.toggle('err', !!isErr); hud.set(msg); };
 const L = (tag, ...args) => SpatialLog.record('splat.' + tag, { args }, tag === 'error' ? 'error' : 'info');
 
-L('boot', 'module loaded, three r' + THREE.REVISION + ', spark 2.1.0');
+L('boot', 'module loaded, three r' + THREE.REVISION + ', spark 2.3.1', { xrScale: XR_SCALE, lodBudget: LOD_BUDGET ?? 'default', maxSh: MAX_SH });
 
 function downloadFile(name, blob) {
   const a = document.createElement('a');
@@ -35,6 +39,7 @@ renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.setClearAlpha(0);
 renderer.xr.enabled = true;
 renderer.xr.setReferenceSpaceType('local-floor');
+renderer.xr.setFramebufferScaleFactor(XR_SCALE);   // must be set before a session starts
 // Manual XR camera updates: when Quest's depth module reports depthFar=Infinity,
 // three propagates it into the camera projections and they go NaN (three#29098).
 // We update manually each frame and repair the matrices before rendering.
@@ -52,11 +57,14 @@ function resetDesktopCamera() {
   camera.updateProjectionMatrix();
 }
 
-// LOD-aware Spark renderer. Budget defaults are platform-aware (500-750K splats
-// in WebXR, 2.5M desktop); the cone foveation defaults spend the budget where
+// LOD-aware Spark renderer. Budget defaults are platform-aware (500K splats on
+// Quest, 2.5M desktop); the cone foveation defaults spend the budget where
 // the user is looking — same philosophy as PlayCanvas's gsplat budget balancer.
-const spark = new SparkRenderer({ renderer, enableLod: true, depthTest: false });
-// Spark 2.1.0 submits generation/readback outside the XR animation callback.
+// maxStdDev √5 is Spark's VR recommendation: ~37% less splat area than √8.
+// maxPagedSplats caps the paged .rad pool, which Spark allocates up front.
+const spark = new SparkRenderer({ renderer, enableLod: true, depthTest: false,
+  maxStdDev: Math.sqrt(5), lodSplatCount: LOD_BUDGET, maxPagedSplats: 64 * 65536 });
+// In XR, Spark submits generation/readback outside the XR animation callback.
 // Explicit flushes prevent fence-based sorting from waiting for a later frame.
 spark.flushAfterGenerate = true;
 spark.flushAfterRead = true;
@@ -155,6 +163,41 @@ let nextId = 1;
 const items = [];     // PlacedItem[]
 let selected = null;
 
+// One PackedSplats (download + decode + LOD tree) per asset, shared by every placed
+// copy. A failed load is forgotten so the next placement retries the download.
+function acquireSplats(asset) {
+  if (!asset.splats) {
+    const ps = asset.splats = new PackedSplats({ url: asset.url, fileName: asset.name, lod: true });
+    ps.users = 0;
+    ps.initialized.catch(() => { if (asset.splats === ps) asset.splats = null; });
+  }
+  asset.splats.users++;
+  return asset.splats;
+}
+function releaseSplats(asset, ps) {
+  if (--ps.users > 0) return;
+  ps.dispose();
+  if (asset.splats === ps) asset.splats = null;
+}
+
+// Fit bounds from up to ~20K sampled splat centres, trimmed to the 1st-99th
+// percentile so stray floaters don't decide the size. Cached on the shared data.
+function fitBounds(ps) {
+  if (ps.fitBounds) return ps.fitBounds;
+  const src = ps.lodSplats?.packedArray ? ps.lodSplats : ps;
+  const n = src.numSplats;
+  if (!src.packedArray || !n) return null;
+  const step = Math.max(1, Math.floor(n / 20000)), count = Math.ceil(n / step);
+  const axes = [0, 1, 2].map(() => new Float32Array(count));
+  for (let i = 0, k = 0; i < n; i += step, k++) {
+    const c = unpackSplat(src.packedArray, i, src.splatEncoding).center;
+    axes[0][k] = c.x; axes[1][k] = c.y; axes[2][k] = c.z;
+  }
+  axes.forEach(a => a.sort());
+  const at = f => new THREE.Vector3(...axes.map(a => a[Math.round(f * (count - 1))]));
+  return ps.fitBounds = new THREE.Box3(at(0.01), at(0.99));
+}
+
 class PlacedItem {
   constructor(asset, id) {
     this.id = id || crypto.randomUUID();
@@ -167,12 +210,15 @@ class PlacedItem {
     this.rig.add(this.content);
     anchorNode.add(this.rig);
 
-    // .rad => paged streaming (chunks fetched on demand); anything else => runtime LOD
-    // tree. nonLod:true shows the plain splats immediately (and gives us CPU-side
-    // data for bounding boxes) while the LOD build runs in a worker, then swaps in.
-    const opts = { url: asset.url, fileName: asset.name };
-    if (asset.kind === 'rad') opts.paged = true; else { opts.lod = true; opts.nonLod = true; }
-    this.splat = new SplatMesh(opts);
+    // .rad => paged streaming (chunks fetched on demand). Anything else => the asset's
+    // shared PackedSplats; its LOD tree is built in a worker before it first appears.
+    if (asset.kind === 'rad') this.splat = new SplatMesh({ url: asset.url, fileName: asset.name, paged: true });
+    else {
+      this.packed = acquireSplats(asset);
+      // Pass the encoding through: SplatMesh otherwise resets a shared PackedSplats' encoding.
+      this.splat = new SplatMesh({ packedSplats: this.packed, splatEncoding: this.packed.splatEncoding });
+    }
+    this.splat.maxSh = MAX_SH; this.splat.updateGenerator();
     this.content.add(this.splat);
 
     this.localBounds = new THREE.Box3(
@@ -186,11 +232,11 @@ class PlacedItem {
 
     this._fitTries = 0;
     this._fitted = false;
-    L('load', 'loading', asset.name, '(' + (opts.paged ? 'paged/streamed' : 'lod+nonLod') + ')');
+    L('load', 'loading', asset.name, '(' + (this.packed ? (this.packed.users > 1 ? 'shared runtime LOD' : 'runtime LOD') : 'paged/streamed') + ')');
     this.ready = this.splat.initialized.then(() => {
       if (this._removed) return;
       this.loaded = true;
-      L('load', asset.name, 'initialized, numSplats=' + (this.splat.numSplats || 0));
+      L('load', asset.name, 'initialized, numSplats=' + this.splatCount);
       this.scheduleRefit();
       saveLayout();
     }).catch((err) => {
@@ -203,18 +249,23 @@ class PlacedItem {
     });
   }
 
-  // With lod:true / paged sources the bounding box is often degenerate right after
-  // `initialized` (splats not yet resident) — retry until real bounds appear.
+  // Paged sources have no bounds right after `initialized` (splats not yet
+  // resident) and grow as pages stream in — retry until real bounds appear.
   scheduleRefit() {
     if (this._removed || this.refit() || this._fitTries++ > 40) return;
     this._fitTimer = setTimeout(() => this.scheduleRefit(), 500);
+  }
+
+  // For runtime-LOD assets this is the LOD tree's node count (~1.4x the source splats).
+  get splatCount() {
+    return (this.packed ? (this.packed.lodSplats ?? this.packed).numSplats : this.splat.numSplats) || 0;
   }
 
   refit() {
     // splats are usually authored Y-down: flip 180° about X
     this.splat.quaternion.set(1, 0, 0, 0);
     let box;
-    try { box = this.splat.getBoundingBox(true); } catch (e) { box = null; }
+    try { box = this.packed ? fitBounds(this.packed)?.clone() : this.splat.getBoundingBox(true); } catch (e) { box = null; }
     const size = new THREE.Vector3(), ctr = new THREE.Vector3();
     const good = !!(box && !box.isEmpty() && Number.isFinite(box.max.y - box.min.y) && box.max.y - box.min.y >= 1e-4);
     if (good) {
@@ -256,7 +307,7 @@ class PlacedItem {
     this.boxHelper.geometry.dispose(); this.boxHelper.material.dispose();
     L('remove', this.id, this.asset.name);
     anchorNode.remove(this.rig);
-    this.splat.dispose();
+    if (this.packed) releaseSplats(this.asset, this.packed); else this.splat.dispose();
     const i = items.indexOf(this);
     if (i >= 0) items.splice(i, 1);
     if (selected === this) selectItem(null);
@@ -298,7 +349,7 @@ function reportPlacement() {
   const signature = it.id + ':' + reason;
   if (signature === placementReport) return;
   placementReport = signature;
-  L('placement_status', { id: it.id, reason, loaded: it.loaded, fitted: it._fitted, splats: it.splat.numSplats,
+  L('placement_status', { id: it.id, reason, loaded: it.loaded, fitted: it._fitted, splats: it.splatCount,
     anchorVisible: anchorNode.visible, position: it.rig.position.toArray(), scale: it.rig.scale.x });
   if (reason === 'load_failed') say('Asset failed to load. Open Logs for the error.', true);
   else if (reason === 'loading') say('Loading ' + it.asset.name + '...');
@@ -437,10 +488,10 @@ function arInit(withFloor, withDepth) {
   };
   if (withDepth) {
     init.optionalFeatures.push('depth-sensing');
-    // gpu-optimized => three r180 auto-renders a depth-priming pass each frame,
-    // so real-world geometry occludes the splats. The resulting NaN projection
-    // matrices (Quest reports depthFar=Infinity, three#29098) are repaired in
-    // the frame loop.
+    // gpu-optimized => three auto-renders a depth-priming pass each frame, so
+    // real-world geometry occludes the splats (broken in r179-r180, three#32155;
+    // needs r181+). NaN union projections (Quest reports depthFar=Infinity,
+    // three#29098) are repaired in the frame loop.
     init.depthSensing = { usagePreference: ['gpu-optimized'], dataFormatPreference: ['float32', 'luminance-alpha', 'unsigned-short'] };
   }
   return init;
@@ -660,7 +711,6 @@ renderer.xr.addEventListener('sessionstart', async () => {
     xrState.bindReference(renderer.xr.getReferenceSpace());
     grid.visible = false;
     controls.enabled = false;
-    renderer.xr.setFoveation(0.3);
     roomAnchored = false;
     restorePending = false;
     xrAnchor = null;
@@ -770,9 +820,9 @@ const xrState = new XRSessionState(controllers, {
   suspend: reason => {
     xrTracking = false; trackedSources.clear(); cancelInput(reason);
     anchorNode.visible = false; reticle.visible = false; hud.mesh.visible = false;
-    clock.getDelta();
+    timer.reset();
   },
-  resume: () => { clock.getDelta(); hud.mesh.visible = true; hud.refresh(); },
+  resume: () => { timer.reset(); hud.mesh.visible = true; hud.refresh(); },
   reset: () => {
     hitTestGeneration++; hitTestSource?.cancel(); hitTestSource = null;
     invalidateAnchors(); roomAnchored = false; anchorNode.visible = false;
@@ -1042,14 +1092,14 @@ addEventListener('resize', () => {
 // ---------------------------------------------------------------------------
 // Frame loop
 // ---------------------------------------------------------------------------
-const clock = new THREE.Clock();
+const timer = new THREE.Timer();   // THREE.Clock is deprecated since r183
 let lastSample = 0;
 let nanFixLogged = false;
 let hb = { frames: 0, last: 0 };   // heartbeat: fps + state every 5s while presenting
 
 function animate(time, frame) {
 
-  let dt = Math.min(clock.getDelta(), 0.1);
+  let dt = Math.min(timer.update().getDelta(), 0.1);
   if (arSession && !renderer.xr.isPresenting) return;
   const refSpace = renderer.xr.getReferenceSpace();
 
@@ -1093,7 +1143,7 @@ function animate(time, frame) {
 
     hb.frames++;
     if (time - hb.last > 5000) {
-      L('render_diagnostics', { loadedSplats: items.map(i => ({ id:i.id, name:i.asset.name, loaded:i.loaded, fitted:i._fitted, count:i.splat.numSplats })),
+      L('render_diagnostics', { loadedSplats: items.map(i => ({ id:i.id, name:i.asset.name, loaded:i.loaded, fitted:i._fitted, count:i.splatCount })),
         activeSplats: spark.activeSplats, instanceCount: spark.geometry.instanceCount, sorting: spark.sorting, sortDirty: spark.sortDirty,
         drawingBuffer: renderer.getDrawingBufferSize(new THREE.Vector2()).toArray(), renderSize: spark.renderSize.toArray(), lod: spark.enableLod, depthTest: spark.material.depthTest,
         depthAvailable: renderer.xr.hasDepthSensing(), anchorVisible: anchorNode.visible,
@@ -1101,7 +1151,7 @@ function animate(time, frame) {
       hud.refresh();
       if (hb.last) L('hb', 'fps=' + (hb.frames / ((time - hb.last) / 1000)).toFixed(1),
         'items=' + items.length, 'anchored=' + roomAnchored, 'placing=' + placing,
-        'splats=' + items.map((i) => i.splat.numSplats || 0).join('/'));
+        'splats=' + items.map((i) => i.splatCount).join('/'));
       hb.last = time; hb.frames = 0;
     }
   }

@@ -236,6 +236,8 @@ document.getElementById('b-nextasset').onclick = () => cycleAsset(1);
 addAsset('./splat_heron.sog', 'splat_heron.sog');
 addAsset('./splat.sog', 'splat.sog');
 addAsset('./splatcaptspirulae.sog', 'splatcaptspirulae.sog');
+addAsset('./splat_Machines_de_l_ile.sog', 'splat_Machines_de_l_ile.sog');
+addAsset('./splat_ile_beaulieu.sog', 'splat_ile_beaulieu.sog');
 for (const s of params.getAll('src')) addAsset(s);
 
 document.getElementById('b-addurl').onclick = () => {
